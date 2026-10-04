@@ -43,16 +43,18 @@ def lemma_path():
     env = os.environ.get("PAE_LEMMA_PATH")
     if env:
         return str(Path(env))
-    return _resolve(_engine_cfg("lemma_path", "resources/ECDICT/lemma.en.txt"),
-                    "resources/ECDICT/lemma.en.txt")
+    # 兜底默认必须与 config.json 的写法一致（../resources/...）：_resolve 是按 pae/ 解析的，
+    # 少了 "../" 会指到 pae/resources/（不存在）——config.json 读不到时就会找错目录。
+    return _resolve(_engine_cfg("lemma_path", "../resources/ECDICT/lemma.en.txt"),
+                    "../resources/ECDICT/lemma.en.txt")
 
 
 def dict_path():
     env = os.environ.get("PAE_DICT_PATH")
     if env:
         return str(Path(env))
-    return _resolve(_engine_cfg("dict_path", "resources/ECDICT/dict.sqlite"),
-                    "resources/ECDICT/dict.sqlite")
+    return _resolve(_engine_cfg("dict_path", "../resources/ECDICT/dict.sqlite"),
+                    "../resources/ECDICT/dict.sqlite")
 
 
 def describe():

@@ -128,7 +128,9 @@ def trend(engine, days=7):
     buckets = {}
     for ts, etype, payload in engine.conn.execute(
             "SELECT ts, type, payload FROM events WHERE ts >= ?", (since,)):
-        day = time.strftime("%Y-%m-%d", time.localtime(ts))
+        # 与 push/scheduler/sensejudge/capsurface 一致，统一用 UTC 日；
+        # 之前这里用 localtime，UTC+8 下趋势与每日配额会差 8 小时。
+        day = time.strftime("%Y-%m-%d", time.gmtime(ts))
         b = buckets.setdefault(day, {"date": day, "encounter": 0, "annotation_shown": 0,
                                      "hover": 0, "known_click": 0, "new_lemmas": set()})
         if etype in b:

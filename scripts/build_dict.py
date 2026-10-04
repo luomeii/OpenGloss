@@ -165,6 +165,11 @@ def main():
     print("dict_words   : %d" % n_words)
     print("exchange_map : %d" % n_map)
     print("elapsed      : %.1fs" % (time.time() - t0))
+    if n_words <= 0 or n_map <= 0:
+        # 空 csv 会产出 20KB 的空库 —— 不能报成功，否则用户以为词典建好了
+        print("ERROR: built dictionary is empty (csv had no usable rows); output is NOT usable.",
+              file=sys.stderr)
+        return 3
     return 0
 
 
