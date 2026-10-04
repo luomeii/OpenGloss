@@ -3,7 +3,7 @@ import json
 import time
 from pathlib import Path
 
-from fastapi import Body, FastAPI, Header
+from fastapi import Body, FastAPI, Header, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -32,8 +32,19 @@ class AnnotateBody(BaseModel):
 
 
 @app.get("/v1/health")
-def health():
+def health(resp: Response):
+    """存活 + 就绪。**必须真的触碰引擎**，否则会说谎。
+
+    旧实现直接返回 ok:true，于是「词典缺失/损坏、库只读」时 health 一律绿，
+    而 status/annotate/event 全 500 —— 而 README 与 start_engine.bat 恰恰拿它当验收标准。
+    现在：引擎能构造 -> 200 ok:true；构造失败 -> 503 ok:false + 原因。
+    """
     from .engine import DB_PATH as _DB
+    try:
+        get_engine()                     # 已构造过时是缓存命中，几乎零成本
+    except Exception as e:
+        resp.status_code = 503
+        return {"ok": False, "db": _DB, "error": "%s: %s" % (type(e).__name__, e)}
     return {"ok": True, "db": _DB}   # 带上库路径：测试能识别「我在跟哪个引擎说话」
 
 

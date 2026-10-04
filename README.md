@@ -51,6 +51,9 @@ OpenGloss 不给你安排任何学习任务。你像平常一样读 GitHub READM
 
 需要 Python 3.10+。引擎内核纯标准库；API 层依赖 fastapi/pydantic/uvicorn（`pip install -r requirements.txt`）。
 
+> ⚠️ **装 Python 时请勾选 Add python.exe to PATH**（官方安装器**默认不勾**）。忘了勾的话，四个 `.bat` 会直接报错提示你，不会假装成功——但引擎起不来。
+> 另：Windows 应用商店那个 `python` 是占位冒牌货，`where python` 找得到它、但它一跑就退出码 49；脚本用的是 `python --version` 来判真伪。
+
 ### 1. 拿到词典（**第一次用必须先做这步**）
 
 词典（65 MB）不入库，二选一：
@@ -125,6 +128,10 @@ set PAE_LLM_MODEL=deepseek-flash      # 模型 ID
 
 跑测试需要额外装依赖：`pip install -r requirements-dev.txt`
 （含 pytest；**浏览器端 12 个脚本还需要 playwright**：`playwright install chromium`）。
+
+> 磁盘：跑测试要额外约 **500 MB**（playwright 的 chromium 内核）。
+> 四个 `.bat`（start/stop/status/backup）**必须留在 `pae/` 目录里运行**——它们第一句就是 `cd /d "%~dp0"`，复制到别处会找不到 `pae_core`。
+> 改这些 `.bat` 时**保持纯 ASCII**：cmd.exe 按系统 OEM 代码页读 .bat，中文注释会乱码甚至被误解析。
 
 两条前置：**① 先按第 1 步建好词典**（单测里 test_full_coverage 直接读 dict.sqlite，没建就跑会挂）；
 **② 测试脚本是 Windows 专用的**（用 `netstat` + `taskkill` 管端口），Linux/macOS 上引擎能跑但验收脚本跑不了。
@@ -230,6 +237,8 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 
 | 症状 | 先查什么 |
 |---|---|
+| **引擎起了但什么都 500**（`/v1/status`、`/v1/annotate` 全挂，health 却是 200） | 新版 health 会**真的触碰引擎**：词典缺失/损坏或库只读时它返回 **503 + `ok:false` + 原因**，不再假装健康。先看它给的原因 |
+| 用 `curl` 发中文 JSON 报解析错 | 中文 Windows 的 cmd/Git Bash 会把中文按 **GBK** 编码送出去，服务端按 UTF-8 解就炸。改 PowerShell 的 `Invoke-RestMethod` 或 Python 客户端 |
 | 页面完全不标注 | ① **浏览器够新吗**（需要 Chrome/Edge **105+**，高亮用 CSS Custom Highlight API；老版本会静默不标注）② 引擎起了吗（health 返回 ok）③ **词典建了吗**（没词典时 health 仍 ok，但 annotate 会 500）④ 扩展开关开了吗 ⑤ 首次加载词典要等十几秒 |
 | 引擎活着但 /v1/annotate 返回 500 | 词典缺失或路径不对——确认 `resources/ECDICT/dict.sqlite` 存在；不存在就从 [Releases](https://github.com/luomeii/OpenGloss/releases/latest) 下 `dict.sqlite`，或跑构建脚本 |
 | 扩展装了但没反应 | 打开扩展弹窗看状态；确认扩展里配的引擎地址与引擎端口一致（换端口见下） |
@@ -255,7 +264,7 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 | `budget` | 8 | **每请求**的注解预算（长页面按 ~1400 字符分块，每块一份预算；整页由扩展的 annCap 限 40） |
 | `bnc_known_rank` | 0 | 0 = 不做词频假设（全当生词）；设 >0 则 BNC 排名 ≤ 该值的词视为已知 |
 | `engine.dict_path` / `engine.lemma_path` | ../resources/ECDICT/… | 词典与词形表位置（相对 `pae/` 目录） |
-| `llm.base` / `llm.model` / `llm.thinking` | deepseek / deepseek-flash / disabled | LLM 接入；key 建议用环境变量 |
+| `llm.base` / `llm.model` / `llm.thinking` | deepseek / deepseek-flash / disabled | LLM 接入；key 建议用环境变量。**默认模型是 `deepseek-flash`**（config.json 是唯一真相源；代码里另有 `deepseek-chat` 兜底，只在 config.json 缺失/读不到时生效） |
 | `agent_schedule` | 关闭 | 后台定时巡检（默认关：每次巡检都是真实花费） |
 | `familiarity_mode` | shadow | `shadow` 只记录不改行为；`enforce` 才真的豁免反复被无视的词 |
 | `selection_mode` | band_priority | 选择层策略；`text_order` 是旧行为 |
@@ -272,7 +281,9 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 浏览器扩展之外，OpenGloss 的能力面（42 项，其中 41 项已实现）也能通过 MCP 给外部 AI 使用（同一套门禁与审计）：
 
 ```bash
-claude mcp add pae -- python pae/mcp_server.py    # 以 Claude Code 为例，其它 MCP 客户端同理
+claude mcp add pae -- python -X utf8 pae/mcp_server.py   # 以 Claude Code 为例，其它 MCP 客户端同理
+#                                     ^^^^^^^ MCP stdio 规范要求 UTF-8；
+#                                     在中文 Windows 上不加它，工具描述会以 GBK 发出、客户端解不开
 ```
 
 外部接入需要签发 key：在 `pae/` 目录下跑 `python -m pae_core.keys issue <名字>`（本机自用不需要）。
