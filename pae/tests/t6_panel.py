@@ -29,6 +29,9 @@ def kill_port(port):
 def start_engine(persona_path):
     env = dict(os.environ)
     env["PAE_PERSONA_PATH"] = str(persona_path)
+    # 必须把数据库也指到临时目录：否则引擎会用默认的 pae/pae.db（= 生产库），
+    # 而这个测试会保存人格并真调 LLM，可能改到真实数据。
+    env["PAE_DB_PATH"] = str(Path(persona_path).parent / "t6_panel.db")
     import shutil
     shutil.copy(ROOT / "persona" / "default.json", persona_path)
     return subprocess.Popen([sys.executable, "-m", "uvicorn", "pae_core.api:app", "--port", str(PORT)],
@@ -100,7 +103,10 @@ finally:
     eng.terminate()
     kill_port(PORT)
     subprocess.Popen([sys.executable, "-m", "uvicorn", "pae_core.api:app", "--port", str(PORT)],
-                     cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     cwd=str(ROOT),
+                     env=dict(os.environ, PAE_PERSONA_PATH=str(tmpd / "persona.json"),
+                              PAE_DB_PATH=str(tmpd / "t6_panel.db")),
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 ok = (res.get("panel_ok") and res.get("prompt_has_爱损人") and res.get("prompt_changed")
       and res.get("save_status", "").startswith("已保存") and res.get("saved_quirk_added")
