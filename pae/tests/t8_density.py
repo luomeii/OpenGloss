@@ -33,7 +33,7 @@ FIX.write_text("<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>" 
 
 
 def kill_port(port):
-    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=20).stdout
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, errors='replace', timeout=20).stdout
     pids = {p.split()[4] for p in out.splitlines()
             if len(p.split()) >= 5 and p.split()[1].endswith(":" + str(port)) and p.split()[3] == "LISTENING"}
     for pid in pids:

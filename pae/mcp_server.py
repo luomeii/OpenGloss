@@ -17,6 +17,15 @@ import sys
 import urllib.error
 import urllib.request
 
+# MCP stdio 规范要求 UTF-8。Windows 上 Python 默认按进程 locale 编码 stdout（中文系统 = cp936），
+# 于是 tools/list 里的中文 description 会被写成 GBK 字节，规范客户端解不开。
+# 在进程启动时自我重定向为 UTF-8，比要求用户改命令行可靠。
+for _s in (sys.stdin, sys.stdout):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 BASE = os.environ.get("PAE_BASE", "http://127.0.0.1:4815").rstrip("/")
 KEY = os.environ.get("PAE_KEY", "")
 PROTOCOL = "2024-11-05"

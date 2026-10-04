@@ -70,7 +70,7 @@ SURFACES = ["contention", "scheduler", "intensified", "worker",
 def port_owner_pids(port):
     try:
         out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                             capture_output=True, text=True, timeout=20).stdout
+                             capture_output=True, text=True, errors='replace', timeout=20).stdout
     except Exception:
         return []
     pids = set()

@@ -105,7 +105,7 @@ res["stats_cache"] = st.get("cache")
 # B 通过 HTTP 能力面：上屏内容必须完全不受影响
 kill_port = lambda p: [subprocess.run(["taskkill", "/F", "/PID", x], capture_output=True)
                        for x in {q.split()[4] for q in subprocess.run(["netstat", "-ano", "-p", "TCP"],
-                                 capture_output=True, text=True).stdout.splitlines()
+                                 capture_output=True, text=True, errors="replace").stdout.splitlines()
                                  if len(q.split()) >= 5 and q.split()[1].endswith(":" + str(p))
                                  and q.split()[3] == "LISTENING"}]
 kill_port(PORT)

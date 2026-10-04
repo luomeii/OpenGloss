@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LOG = Path(__file__).parent / "nightly_log.txt"
 
 PROBES = [
-    ("unit", ["python", "-m", "pytest", "pae_core", "-q"]),
+    ("unit", ["python", "-X", "utf8", "-m", "pytest", "pae_core", "-q"]),
     ("m2", ["python", "-X", "utf8", "tests/m2_acceptance.py"]),
     ("toggle", ["python", "-X", "utf8", "tests/toggle_probe.py"]),
     # 名字如实描述被测对象：5000 词输入的 HTTP 往返 + 前 8 词记账（段 B/C 是同构估算）
