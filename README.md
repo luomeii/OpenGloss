@@ -52,7 +52,8 @@ OpenGloss 不给你安排任何学习任务。你像平常一样读 GitHub READM
 需要 Python 3.10+。引擎内核纯标准库；API 层依赖 fastapi/pydantic/uvicorn（`pip install -r requirements.txt`）。
 
 > ⚠️ **装 Python 时请勾选 Add python.exe to PATH**（官方安装器**默认不勾**）。忘了勾的话，四个 `.bat` 会直接报错提示你，不会假装成功——但引擎起不来。
-> 另：Windows 应用商店那个 `python` 是占位冒牌货，`where python` 找得到它、但它一跑就退出码 49；脚本用的是 `python --version` 来判真伪。
+> 另：Windows 应用商店那个 `python` 是占位冒牌货——`where python` 找得到它，但它跑不了任何脚本（退出码非零）。
+> 所以脚本判真伪看的是 `python --version` 的**退出码是否为 0**，而不是 `where` 找不找得到。
 
 ### 1. 拿到词典（**第一次用必须先做这步**）
 
@@ -129,7 +130,8 @@ set PAE_LLM_MODEL=deepseek-flash      # 模型 ID
 跑测试需要额外装依赖：`pip install -r requirements-dev.txt`
 （含 pytest；**浏览器端 12 个脚本还需要 playwright**：`playwright install chromium`）。
 
-> 磁盘：跑测试要额外约 **500 MB**（playwright 的 chromium 内核）。
+> 磁盘：跑测试要额外约 **700 MB 以上**（playwright 的 chromium 432 MB + headless shell 271 MB；
+> 若保留多个修订版本会到 1 GB 以上）。
 > 四个 `.bat`（start/stop/status/backup）**必须留在 `pae/` 目录里运行**——它们第一句就是 `cd /d "%~dp0"`，复制到别处会找不到 `pae_core`。
 > 改这些 `.bat` 时**保持纯 ASCII**：cmd.exe 按系统 OEM 代码页读 .bat，中文注释会乱码甚至被误解析。
 
@@ -237,6 +239,7 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 
 | 症状 | 先查什么 |
 |---|---|
+| 趋势图上「今天」是空的，或凌晨学的内容算到了昨天 | **日界是 UTC，不是本地时间**。引擎里所有按天分桶（趋势、每日配额、主动说话次数）统一用 UTC 日，所以对 UTC+8 来说是**本地早上 8 点换日**。这是为了避免「趋势按本地日、配额按 UTC 日」两边差 8 小时 |
 | **引擎起了但什么都 500**（`/v1/status`、`/v1/annotate` 全挂，health 却是 200） | 新版 health 会**真的触碰引擎**：词典缺失/损坏或库只读时它返回 **503 + `ok:false` + 原因**，不再假装健康。先看它给的原因 |
 | 用 `curl` 发中文 JSON 报解析错 | 中文 Windows 的 cmd/Git Bash 会把中文按 **GBK** 编码送出去，服务端按 UTF-8 解就炸。改 PowerShell 的 `Invoke-RestMethod` 或 Python 客户端 |
 | 页面完全不标注 | ① **浏览器够新吗**（需要 Chrome/Edge **105+**，高亮用 CSS Custom Highlight API；老版本会静默不标注）② 引擎起了吗（health 返回 ok）③ **词典建了吗**（没词典时 health 仍 ok，但 annotate 会 500）④ 扩展开关开了吗 ⑤ 首次加载词典要等十几秒 |
@@ -281,9 +284,9 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 浏览器扩展之外，OpenGloss 的能力面（42 项，其中 41 项已实现）也能通过 MCP 给外部 AI 使用（同一套门禁与审计）：
 
 ```bash
-claude mcp add pae -- python -X utf8 pae/mcp_server.py   # 以 Claude Code 为例，其它 MCP 客户端同理
-#                                     ^^^^^^^ MCP stdio 规范要求 UTF-8；
-#                                     在中文 Windows 上不加它，工具描述会以 GBK 发出、客户端解不开
+claude mcp add pae -- python pae/mcp_server.py    # 以 Claude Code 为例，其它 MCP 客户端同理
+# mcp_server.py 启动时会把 stdin/stdout 自我重定向为 UTF-8（MCP stdio 规范要求 UTF-8，
+# 而中文 Windows 的默认 stdout 编码是 cp936），所以**不需要**加 -X utf8。
 ```
 
 外部接入需要签发 key：在 `pae/` 目录下跑 `python -m pae_core.keys issue <名字>`（本机自用不需要）。

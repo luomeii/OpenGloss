@@ -102,11 +102,12 @@ try:
 finally:
     eng.terminate()
     kill_port(PORT)
+    # 恢复：这里**故意不传** PAE_DB_PATH —— 它继承 os.environ，也就是把引擎还原成
+    # 用户原来的那个（默认 pae/pae.db）。上面被测的那次启动才用临时库。
+    # 曾经给这里也加上临时库，结果每跑一次本测试就在 4815 上留下一个指向临时库的
+    # 引擎，看起来"恢复了"其实没有。
     subprocess.Popen([sys.executable, "-m", "uvicorn", "pae_core.api:app", "--port", str(PORT)],
-                     cwd=str(ROOT),
-                     env=dict(os.environ, PAE_PERSONA_PATH=str(tmpd / "persona.json"),
-                              PAE_DB_PATH=str(tmpd / "t6_panel.db")),
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                     cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 ok = (res.get("panel_ok") and res.get("prompt_has_爱损人") and res.get("prompt_changed")
       and res.get("save_status", "").startswith("已保存") and res.get("saved_quirk_added")

@@ -1,14 +1,17 @@
 @echo off
 rem Report whether the engine is up AND is using this folder's pae.db.
 rem
-rem NOTE: PowerShell 5.1's Invoke-RestMethod decodes a charset-less
+rem NOTE 1: PowerShell 5.1's Invoke-RestMethod decodes a charset-less
 rem application/json body as ISO-8859-1, so a db path containing non-ASCII
-rem characters comes back as mojibake and every comparison fails. That is why
-rem this script reads the RAW bytes and decodes them as UTF-8 itself.
-rem The previous version only checked that /v1/health answered at all, so any
-rem HTTP server on 4815 (or an engine using another database) looked healthy.
+rem characters comes back as mojibake and every comparison fails. We read the
+rem RAW bytes and decode them as UTF-8 ourselves.
+rem NOTE 2: /v1/health now really touches the engine, and a cold engine spends
+rem ~25s loading the 65 MB dictionary, so the timeout below must exceed that.
+rem NOTE 3: a 503 is NOT 'down' -- it means the engine is running but could not
+rem build (missing or corrupt dictionary). Its body carries the reason; print it.
 rem Keep this file ASCII-only: cmd.exe reads .bat in the OEM code page.
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Continue'; $mine = (Join-Path (Get-Location).Path 'pae.db'); try { $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:4815/v1/health' -UseBasicParsing -TimeoutSec 5; $txt = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()); $h = $txt | ConvertFrom-Json; $null = Invoke-WebRequest -Uri 'http://127.0.0.1:4815/v1/status' -UseBasicParsing -TimeoutSec 15; if ($h.db -and ($h.db.ToString().ToLower() -eq $mine.ToLower())) { Write-Host ('[PAE] engine UP  (db=' + $h.db + ')') } else { Write-Host '[PAE] NOT OK: something answers on 4815 but it is not using this folder''s pae.db'; Write-Host ('        it reports db=' + $h.db); exit 1 } } catch { Write-Host '[PAE] engine DOWN'; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Continue'; $mine = (Join-Path (Get-Location).Path 'pae.db'); $resp = $null; try { $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:4815/v1/health' -UseBasicParsing -TimeoutSec 60 } catch { $code = 0; $body = ''; try { $code = [int]$_.Exception.Response.StatusCode } catch { }; try { $sr = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream(), [System.Text.Encoding]::UTF8); $body = $sr.ReadToEnd(); $sr.Close() } catch { }; if ($code -eq 503) { Write-Host '[PAE] engine is RUNNING but NOT healthy (it answered 503):'; if ($body -match '\"error\"\s*:\s*\"([^\"]*)\"') { Write-Host ('        ' + $Matches[1]) } else { Write-Host ('        ' + $body) } } else { Write-Host '[PAE] engine DOWN (nothing is listening on 4815)' } exit 1 }; $txt = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()); $h = $txt | ConvertFrom-Json; if ($h.db -and ($h.db.ToString().ToLower() -eq $mine.ToLower())) { Write-Host ('[PAE] engine UP  (db=' + $h.db + ')') } else { Write-Host '[PAE] NOT OK: something answers on 4815 but it is not using this folder''s pae.db'; Write-Host ('        it reports db=' + $h.db); exit 1 }"
 if errorlevel 1 ( echo. & pause & exit /b 1 )
 pause
+exit /b 0
