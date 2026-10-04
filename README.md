@@ -74,8 +74,9 @@ python scripts/build_dict.py --csv resources/ECDICT/ecdict.csv --out resources/E
 
 两条路产出的词典等价：77 万词条 + 5.8 万变形映射。详见 [resources/ECDICT/README.md](resources/ECDICT/README.md)。
 
-> ⚠️ **没有词典就起引擎的话**：/v1/health 仍会返回 `{"ok":true}`（它只表示进程活着），
-> 但 /v1/annotate 会直接 500——所以务必先做这一步。
+> ⚠️ **没有词典就起引擎的话**：引擎能起来，但 /v1/health 会返回 **503 + `ok:false`**，
+> 并带上 `hint` 告诉你缺什么；/v1/annotate 也会 500。所以务必先做这一步。
+> （旧版 health 在这种情况下会撒谎说 ok:true，已修。）
 
 ### 2. 起引擎
 
@@ -84,13 +85,15 @@ cd pae
 start_engine.bat        # 或: python -m uvicorn pae_core.api:app --port 4815
 ```
 
-`start_engine.bat` 固定监听 4815，且只要该端口有人监听就提示「already running」；
+`start_engine.bat` 固定监听 4815，而且会**核对端口上那个引擎用的是不是本目录的 `pae.db`**：
+本目录的库 → `engine ready`；别人的库 → 立刻报 ERROR 并 `exit 1`（不会让你以为起好了）。
 要换端口或端口被别的程序占用时，直接用右边的 uvicorn 命令并改 `--port`。
 
 > **Linux / macOS**：四个 .bat（start/stop/status/backup）是 Windows 专用，请直接用
 > `python -m uvicorn pae_core.api:app --port 4815` 起引擎，停止就 Ctrl-C。其余步骤完全一样。
 
-验证：http://127.0.0.1:4815/v1/health 返回 `{"ok":true}`（首次加载词典约 15 秒）。
+验证：http://127.0.0.1:4815/v1/health 返回 `{"ok":true}`。
+**首次启动要加载 65 MB 词典，约 25 秒**（机器忙时更久）——这期间 health 会阻塞或超时，属正常。
 
 ### 3. 装浏览器扩展
 
@@ -243,7 +246,7 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 | 趋势图上「今天」是空的，或凌晨学的内容算到了昨天 | **日界是 UTC，不是本地时间**。引擎里所有按天分桶（趋势、每日配额、主动说话次数）统一用 UTC 日，所以对 UTC+8 来说是**本地早上 8 点换日**。这是为了避免「趋势按本地日、配额按 UTC 日」两边差 8 小时 |
 | **引擎起了但什么都 500**（`/v1/status`、`/v1/annotate` 全挂，health 却是 200） | 新版 health 会**真的触碰引擎**：词典缺失/损坏或库只读时它返回 **503 + `ok:false` + 原因**，不再假装健康。先看它给的原因 |
 | 用 `curl` 发中文 JSON 报解析错 | 中文 Windows 的 cmd/Git Bash 会把中文按 **GBK** 编码送出去，服务端按 UTF-8 解就炸。改 PowerShell 的 `Invoke-RestMethod` 或 Python 客户端 |
-| 页面完全不标注 | ① **浏览器够新吗**（需要 Chrome/Edge **105+**，高亮用 CSS Custom Highlight API；老版本会静默不标注）② 引擎起了吗（health 返回 ok）③ **词典建了吗**（没词典时 health 仍 ok，但 annotate 会 500）④ 扩展开关开了吗 ⑤ 首次加载词典要等十几秒 |
+| 页面完全不标注 | ① **浏览器够新吗**（需要 Chrome/Edge **105+**，高亮用 CSS Custom Highlight API；老版本会静默不标注）② 引擎起了吗（health 返回 `ok:true`；**没词典时它会返 503**，那就先补第 1 步）③ **词典建了吗**（没词典时 health 仍 ok，但 annotate 会 500）④ 扩展开关开了吗 ⑤ 首次加载词典要等十几秒 |
 | 引擎活着但 /v1/annotate 返回 500 | 词典缺失或路径不对——确认 `resources/ECDICT/dict.sqlite` 存在；不存在就从 [Releases](https://github.com/luomeii/OpenGloss/releases/latest) 下 `dict.sqlite`，或跑构建脚本 |
 | 扩展装了但没反应 | 打开扩展弹窗看状态；确认扩展里配的引擎地址与引擎端口一致（换端口见下） |
 | 侧栏指标全是 0 / 空 | 多数情况正常：转化率要「首遇满 7 天」的成熟词才有数；悬停率/点击率要你真悬停/点击过才有 |
