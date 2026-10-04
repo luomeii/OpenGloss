@@ -239,6 +239,7 @@ SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisio
 
 | 症状 | 先查什么 |
 |---|---|
+| **刚克隆完，health 就返回 503**（说词典缺失/损坏），annotate 也全 500 | 你跳过了**第 1 步** —— `dict.sqlite` 有 65 MB，不在仓库里（.gitignore 排除），要去 **Releases** 下载后放进 `resources/ECDICT/`。这是**第 0 步**，不是可选步骤 |
 | 趋势图上「今天」是空的，或凌晨学的内容算到了昨天 | **日界是 UTC，不是本地时间**。引擎里所有按天分桶（趋势、每日配额、主动说话次数）统一用 UTC 日，所以对 UTC+8 来说是**本地早上 8 点换日**。这是为了避免「趋势按本地日、配额按 UTC 日」两边差 8 小时 |
 | **引擎起了但什么都 500**（`/v1/status`、`/v1/annotate` 全挂，health 却是 200） | 新版 health 会**真的触碰引擎**：词典缺失/损坏或库只读时它返回 **503 + `ok:false` + 原因**，不再假装健康。先看它给的原因 |
 | 用 `curl` 发中文 JSON 报解析错 | 中文 Windows 的 cmd/Git Bash 会把中文按 **GBK** 编码送出去，服务端按 UTF-8 解就炸。改 PowerShell 的 `Invoke-RestMethod` 或 Python 客户端 |
