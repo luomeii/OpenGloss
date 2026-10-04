@@ -1,18 +1,16 @@
 @echo off
-rem Start the OpenGloss engine on port 4815.
+rem Start the OpenGloss engine on port 4815, then wait until it answers with
+rem the pae.db of THIS folder. Two false-success traps are avoided:
+rem  - /v1/health alone is not enough (it stays ok even when the engine failed
+rem    to build), and any 200 is not enough either: a leftover engine using a
+rem    different database also answers 200 -- the old check called that ready.
+rem  - if the port is held by an engine with another database, say so AT ONCE
+rem    instead of polling silently for minutes.
 rem Keep this file ASCII-only: cmd.exe reads .bat in the OEM code page.
 cd /d "%~dp0"
 
-rem Why this guard looks odd -- three cmd.exe traps:
-rem  1) 'where python' is not usable: the Microsoft Store stub is a real
-rem     python.exe that 'where' finds but which cannot run anything.
-rem  2) exit codes are compared as STRINGS ("%errorlevel%"=="0"), never with
-rem     'if errorlevel 1': a broken install (missing DLL) or a crashed child
-rem     exits in the 0x8xxxxxxx range, i.e. NEGATIVE, and 'if errorlevel 1'
-rem     does not catch those -- it would report success.
-rem  3) no pipe and no nested 'exit /b': a failed pipeline aborted the script
-rem     with a bare 255, and an 'exit /b N' that is not the last statement of
-rem     its parenthesised block loses N (cmd parses the block first).
+rem Why this guard looks odd -- see status_engine.bat NOTE 4 about quote parity,
+rem and never write a bare percent sign in a .bat: cmd expands it as a variable.
 set "PAE_PY="
 python --version >nul 2>nul
 if "%errorlevel%"=="0" set "PAE_PY=python"
@@ -28,16 +26,7 @@ exit /b 1
 
 :pae_run
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Continue'; $c = Get-NetTCPConnection -LocalPort 4815 -State Listen -ErrorAction SilentlyContinue; if ($c) { Write-Host ('[PAE] already running, PID ' + $c[0].OwningProcess) } else { Start-Process -WindowStyle Hidden python -ArgumentList '-m','uvicorn','pae_core.api:app','--port','4815' -WorkingDirectory (Get-Location).Path }"
-if errorlevel 1 ( echo [PAE] ERROR: could not launch uvicorn. & pause & exit /b 1 )
-
-rem Wait until the engine answers /v1/health AND reports THIS folder's pae.db.
-rem /v1/health alone is not enough (it stays ok even when the engine is broken),
-rem and any 200 is not enough either: a leftover engine using a different
-rem database also answers 200, and the old check called that 'ready'.
-rem First start loads a 65 MB dictionary (~25s, minutes when the disk is busy),
-rem so the loop below can legitimately run for several minutes.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Continue'; $mine = (Join-Path (Get-Location).Path 'pae.db'); $ok = $false; for ($i=0; $i -lt 45; $i++) { try { $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:4815/v1/health' -UseBasicParsing -TimeoutSec 10; $txt = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray()); $h = $txt | ConvertFrom-Json; if ($h.db -and ($h.db.ToString().ToLower() -eq $mine.ToLower())) { $ok = $true; break } } catch { } Start-Sleep -Seconds 2 }; if ($ok) { Write-Host '[PAE] engine ready: http://127.0.0.1:4815' } else { Write-Host '[PAE] ERROR: no engine using THIS folder''s pae.db answered (waited several minutes).'; Write-Host '        Another program may hold port 4815, or the engine failed to start.'; Write-Host '        Run it in the foreground to see why:  python -m uvicorn pae_core.api:app --port 4815'; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Continue'; $mine = (Join-Path (Get-Location).Path 'pae.db'); $c = Get-NetTCPConnection -LocalPort 4815 -State Listen -ErrorAction SilentlyContinue; if (-not $c) {   Write-Host '[PAE] starting the engine (first start loads a 65 MB dictionary, about 25s)...';   Start-Process -WindowStyle Hidden python -ArgumentList '-m','uvicorn','pae_core.api:app','--port','4815' -WorkingDirectory (Get-Location).Path } else {   Write-Host ('[PAE] port 4815 is already held by PID ' + $c[0].OwningProcess + ' - checking which database it uses...') }; $sw = [System.Diagnostics.Stopwatch]::StartNew(); $ok = $false; $other = ''; $next = 10; while ($sw.Elapsed.TotalSeconds -lt 120) {   try {     $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:4815/v1/health' -UseBasicParsing -TimeoutSec 8;     $txt = [System.Text.Encoding]::UTF8.GetString($resp.RawContentStream.ToArray());     $h = ConvertFrom-Json -InputObject $txt;     if ($h.db -and ($h.db.ToString().ToLower() -eq $mine.ToLower())) { $ok = $true; break }     if ($h.db) { $other = $h.db; break }   } catch { };   if ($sw.Elapsed.TotalSeconds -ge $next) { Write-Host ('[PAE] still waiting... ' + [int]$sw.Elapsed.TotalSeconds + 's'); $next = $next + 10 }   Start-Sleep -Seconds 2 }; if ($ok) { Write-Host '[PAE] engine ready: http://127.0.0.1:4815'; exit 0 }; if ($other) {   Write-Host '[PAE] ERROR: port 4815 is held by an engine that is NOT using the pae.db of this folder.';   Write-Host ('        it reports db=' + $other);   Write-Host ('        this folder expects ' + $mine);   Write-Host '        Stop that one first (stop_engine.bat), or run this from the folder it belongs to.';   exit 1 }; Write-Host '[PAE] ERROR: nothing answered on 4815 with the pae.db of this folder within 120s.'; Write-Host '        Run it in the foreground to see why:  python -m uvicorn pae_core.api:app --port 4815'; exit 1"
 if errorlevel 1 ( pause & exit /b 1 )
 pause
 exit /b 0
