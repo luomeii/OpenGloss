@@ -44,7 +44,17 @@ def health(resp: Response):
         get_engine()                     # 已构造过时是缓存命中，几乎零成本
     except Exception as e:
         resp.status_code = 503
-        return {"ok": False, "db": _DB, "error": "%s: %s" % (type(e).__name__, e)}
+        msg = "%s: %s" % (type(e).__name__, e)
+        low = msg.lower()
+        # 把最常见的失败翻译成新人能照做的提示：词典是第 1 步，且它不在 git 仓库里
+        if (isinstance(e, FileNotFoundError) or "no such table" in low
+                or "file is not a database" in low or "unable to open database" in low
+                or "no such file" in low):
+            hint = ("词典缺失或损坏：请按 README 第 1 步，把 dict.sqlite 放到 resources/ECDICT/ 下"
+                    "（约 65 MB，不在 git 仓库里，需从 Releases 下载）")
+        else:
+            hint = ""
+        return {"ok": False, "db": _DB, "error": msg, "hint": hint}
     return {"ok": True, "db": _DB}   # 带上库路径：测试能识别「我在跟哪个引擎说话」
 
 
