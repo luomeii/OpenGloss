@@ -1,4 +1,9 @@
+# -*- coding: utf-8 -*-
 # 开发/测试用依赖（运行引擎本身不需要）
+#
+# 注意：本文件必须保持首行有 coding 声明，或全文件为纯 ASCII。
+# 否则在中文 Windows（cp936 locale）上 pip 会以本地编码解码本文件并崩溃：
+#   UnicodeDecodeError: 'gbk' codec can't decode byte ...
 -r requirements.txt
 
 # 单元测试（pae_core 下 6 个 test_*.py）
