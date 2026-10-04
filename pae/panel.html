@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>PAE 人格面板</title>
+<style>
+ :root { --amber:#d97706; --soft:#ffd666; --ink:#1f2328; --muted:#6b7280; --line:#e5e7eb; }
+ * { box-sizing:border-box; }
+ body { margin:0; font:14px/1.6 system-ui,'Segoe UI',sans-serif; color:var(--ink); background:#fcfcfb; }
+ header { padding:16px 24px 11px; border-bottom:1px solid var(--line); background:linear-gradient(180deg,#fffdf7,#fff); }
+ h1 { margin:0 0 3px; font-size:17px; }
+ .sub { color:var(--muted); font-size:12.5px; }
+ .wrap { display:grid; grid-template-columns:minmax(400px,1fr) minmax(420px,1fr); height:calc(100vh - 76px); }
+ .col { overflow:auto; padding:16px 20px 40px; }
+ .col.right { border-left:1px solid var(--line); background:#fff; }
+ .card { border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin-bottom:12px; background:#fff; }
+ .card h2 { margin:0 0 9px; font-size:12.5px; color:var(--amber); }
+ label.row { display:flex; align-items:center; gap:9px; margin-bottom:6px; }
+ label.row .k { width:70px; color:var(--muted); font-size:12.5px; flex:none; }
+ input[type=text], textarea { width:100%; font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:7px; }
+ textarea { min-height:58px; resize:vertical; }
+ input[type=range] { flex:1; accent-color:var(--amber); }
+ .val { width:34px; text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); font-size:12.5px; flex:none; }
+ .band { color:var(--amber); font-size:11.5px; margin:0 0 9px 79px; }
+ .li { display:flex; gap:6px; margin-bottom:6px; }
+ .li button { border:1px solid var(--line); background:#fff; border-radius:7px; padding:0 9px; cursor:pointer; color:var(--muted); }
+ .add { border:1px dashed var(--line); background:#fff; border-radius:7px; padding:4px 10px; cursor:pointer; color:var(--muted); font-size:12.5px; }
+ button.primary { background:var(--amber); color:#fff; border:none; border-radius:8px; padding:7px 15px; cursor:pointer; font-weight:600; }
+ pre.prompt { margin:0; padding:12px; background:#fbfbf9; border:1px solid var(--line); border-radius:9px; font:11.5px/1.55 ui-monospace,Consolas,monospace; white-space:pre-wrap; max-height:56vh; overflow:auto; }
+ .reply { margin-top:8px; padding:10px 12px; background:#fffdf4; border:1px solid #f3e2b8; border-left:3px solid var(--amber); border-radius:8px; min-height:40px; }
+ .status { color:var(--muted); font-size:12.5px; margin-left:9px; }
+ .btnrow { display:flex; align-items:center; gap:8px; margin-top:9px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PAE 人格面板</h1>
+  <div class="sub">改左边的参数 → 右边实时看到「发给 LLM 的那份提示词」。人格的本质就是这份提示词，模板与参数只是它的两个来源。</div>
+</header>
+<div class="wrap">
+  <div class="col left">
+    <div class="card">
+      <h2>基本</h2>
+      <label class="row"><span class="k">名字</span><input type="text" id="f_name"></label>
+      <label class="row"><span class="k">怎么称呼你</span><input type="text" id="f_addr"></label>
+    </div>
+    <div class="card">
+      <h2>性格轴（0-1：拖滑块，参数口自己翻译成人话）</h2>
+      <div id="traits"></div>
+    </div>
+    <div class="card">
+      <h2>口癖（最多 8 条）</h2>
+      <div id="quirks"></div>
+      <button class="add" id="addQuirk">+ 加一条</button>
+    </div>
+    <div class="card">
+      <h2>设定语（她是谁）</h2>
+      <textarea id="f_backstory"></textarea>
+    </div>
+    <div class="card">
+      <h2>自由风格补充（优先级高于默认）</h2>
+      <textarea id="f_style" placeholder="想到什么写什么"></textarea>
+    </div>
+    <div class="card">
+      <h2>禁忌清单（红线，每条都会进提示词）</h2>
+      <div id="forbidden"></div>
+      <button class="add" id="addForbidden">+ 加一条</button>
+    </div>
+  </div>
+  <div class="col right">
+    <div class="card">
+      <h2>渲染后的提示词（实时）</h2>
+      <pre class="prompt" id="prompt">加载中…</pre>
+      <div class="btnrow"><button class="primary" id="save">保存人格</button><span class="status" id="saveStatus"></span></div>
+    </div>
+    <div class="card">
+      <h2>试说一句（用当前人格直接问它）</h2>
+      <textarea id="stimulus" placeholder="例：用户刚连续悬停 contention 三次又走开，你要说什么？"></textarea>
+      <label class="row" style="margin-top:8px"><span class="k">状态注入</span><input type="text" id="ctx" placeholder="（可选）例：近7天遭遇128次，contention S=0.31 在带内"></label>
+      <div class="btnrow"><button class="primary" id="say">让它说</button><span class="status" id="sayStatus"></span></div>
+      <div class="reply" id="reply">—</div>
+    </div>
+  </div>
+</div>
+<script>
+var TRAITS = ['warmth','verbosity','humor','formality','proactivity'];
+var TLABEL = { warmth:'温度', verbosity:'话量', humor:'幽默', formality:'正式度', proactivity:'主动度' };
+var P = null, tmr = null;
+
+function el(id){ return document.getElementById(id); }
+function post(url, body){
+  return fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
+    .then(function(r){ return r.json(); });
+}
+
+function buildTraits(){
+  var host = el('traits');
+  TRAITS.forEach(function(k){
+    var d = document.createElement('div');
+    d.innerHTML = '<label class="row"><span class="k">' + TLABEL[k] + '</span>'
+      + '<input type="range" min="0" max="100" id="s_' + k + '">'
+      + '<span class="val" id="v_' + k + '"></span></label>'
+      + '<div class="band" id="b_' + k + '"></div>';
+    host.appendChild(d);
+    el('s_' + k).addEventListener('input', function(){
+      P.traits[k] = (+el('s_' + k).value) / 100;
+      el('v_' + k).textContent = P.traits[k].toFixed(2);
+      preview();
+    });
+  });
+}
+
+function listRow(value, onDel){
+  var row = document.createElement('div');
+  row.className = 'li';
+  var inp = document.createElement('input');
+  inp.type = 'text'; inp.value = value;
+  inp.addEventListener('input', function(){ onDel(inp.value); preview(); });
+  var btn = document.createElement('button');
+  btn.textContent = '删';
+  btn.addEventListener('click', function(){ onDel(null, true); preview(); });
+  row.appendChild(inp); row.appendChild(btn);
+  return row;
+}
+
+function renderList(hostId, arr){
+  var host = el(hostId);
+  host.innerHTML = '';
+  arr.forEach(function(v, i){
+    host.appendChild(listRow(v, function(val, del){
+      if (del) arr.splice(i, 1); else arr[i] = val;
+      if (del) renderList(hostId, arr);
+    }));
+  });
+}
+
+function fill(){
+  el('f_name').value = P.name || '';
+  el('f_addr').value = P.address_user || '';
+  el('f_backstory').value = P.backstory_seed || '';
+  el('f_style').value = P.style_notes || '';
+  TRAITS.forEach(function(k){
+    var v = (P.traits && P.traits[k] !== undefined) ? P.traits[k] : 0.5;
+    el('s_' + k).value = Math.round(v * 100);
+    el('v_' + k).textContent = (+v).toFixed(2);
+  });
+  renderList('quirks', P.quirks || []);
+  renderList('forbidden', P.forbidden || []);
+}
+
+function sync(){
+  P.name = el('f_name').value;
+  P.address_user = el('f_addr').value;
+  P.backstory_seed = el('f_backstory').value;
+  P.style_notes = el('f_style').value;
+}
+
+function preview(){
+  sync();
+  clearTimeout(tmr);
+  tmr = setTimeout(function(){
+    post('/v1/persona/preview', { params: P }).then(function(j){
+      el('prompt').textContent = j.prompt || '';
+      var b = j.bands || {};
+      TRAITS.forEach(function(k){ if (b[k]) el('b_' + k).textContent = b[k]; });
+    });
+  }, 260);
+}
+
+['f_name','f_addr','f_backstory','f_style'].forEach(function(id){
+  document.addEventListener('DOMContentLoaded', function(){});
+});
+function bindBasics(){
+  ['f_name','f_addr','f_backstory','f_style'].forEach(function(id){
+    el(id).addEventListener('input', preview);
+  });
+}
+
+el('addQuirk').addEventListener('click', function(){
+  P.quirks = P.quirks || [];
+  if (P.quirks.length >= 8) { el('saveStatus').textContent = '口癖上限 8 条'; return; }
+  P.quirks.push(''); renderList('quirks', P.quirks); preview();
+});
+el('addForbidden').addEventListener('click', function(){
+  P.forbidden = P.forbidden || [];
+  P.forbidden.push(''); renderList('forbidden', P.forbidden); preview();
+});
+el('save').addEventListener('click', function(){
+  sync();
+  post('/v1/persona', { params: P }).then(function(j){
+    el('saveStatus').textContent = j.ok ? ('已保存 → ' + j.saved_to) : ('校验未过：' + (j.issues || []).join('; '));
+  });
+});
+el('say').addEventListener('click', function(){
+  sync();
+  el('sayStatus').textContent = '思考中…';
+  el('reply').textContent = '…';
+  post('/v1/persona/say', { params: P, stimulus: el('stimulus').value, context_block: el('ctx').value })
+    .then(function(j){
+      el('reply').textContent = j.reply || j.error || '（无回复）';
+      el('sayStatus').textContent = j.elapsed_ms ? (j.elapsed_ms + ' ms') : '';
+    });
+});
+
+buildTraits();
+bindBasics();
+fetch('/v1/persona').then(function(r){ return r.json(); }).then(function(j){
+  P = j.params; P.quirks = P.quirks || []; P.forbidden = P.forbidden || [];
+  fill(); preview();
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# 运行时数据（学习账本）
+pae/pae.db*
+pae/keys.json
+
+# 备份与测试日志（backup.bat / nightly.py 的产物；含个人学习数据副本，绝不入库）
+pae/backups/
+pae/tests/nightly_log.txt
+
+# Python 缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 测试产物
+pae/tests/artifacts/
+
+# 大文件词典源（不入库：65MB，可由 scripts/build_dict.py 重建）
+resources/ECDICT/dict.sqlite
+resources/ECDICT/ecdict*.csv
+
+# 日志与临时输出
+pae/*.txt
+*.log
+
+# 防误加（通用模式：草稿/备份/归档/工作区目录/压缩包一律不入库）
+keys.json
+*.bak
+*.rar
+*.zip
+*.7z
+_*/
+*存档*.md
+*备份*/

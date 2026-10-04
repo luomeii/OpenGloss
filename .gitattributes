@@ -1,0 +1,10 @@
+# 冻结内核（state/fold/lemmatize）的哈希是按原始字节校验的——
+# 若被 CRLF 检出，t13_conformance 会全线失败。强制 LF。
+*.py   text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat  text eol=crlf

@@ -1,0 +1,9 @@
+# 开发/测试用依赖（运行引擎本身不需要）
+-r requirements.txt
+
+# 单元测试（pae_core 下 6 个 test_*.py）
+pytest>=8.0
+
+# 浏览器端验收（tests/ 下 12 个脚本 import；装完还要下载内核：
+#   playwright install chromium）
+playwright>=1.40

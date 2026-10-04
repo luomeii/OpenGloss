@@ -1,0 +1,29 @@
+{
+  "annotate_max_s": 0.75,
+  "budget": 8,
+  "bnc_known_rank": 0,
+  "engine": {
+    "dict_path": "../resources/ECDICT/dict.sqlite",
+    "lemma_path": "../resources/ECDICT/lemma.en.txt"
+  },
+  "llm": {
+    "base": "https://api.deepseek.com",
+    "model": "deepseek-flash",
+    "thinking": "disabled"
+  },
+  "_bnc_note": "0 = 不做词频假设（用户 2026-10-01 要求：先全部当不会，慢慢积累）。设 >0 则 BNC 排名 ≤ 该值的词视为已知不注解",
+  "agent_schedule": {
+    "enabled": false,
+    "interval_min": 30,
+    "min_new_events": 3
+  },
+  "familiarity_mode": "shadow",
+  "_familiarity_note": "off/shadow/enforce。shadow（默认）=只记录「若启用会豁免谁」，行为零变化；enforce=真的不再注解那些被反复无视的词（需用户点头）",
+  "selection_mode": "band_priority",
+  "_selection_note": "band_priority=学习带优先（带内词最贴边缘的先，pinned 最优先）；text_order=旧的文本顺序",
+  "chat_history_turns": 64,
+  "_chat_history_note": "persona.say 送入 LLM 的历史轮数（user+agent 各算一轮）。此前 6 轮太短，用户聊 30 轮连第一句都忘了；模型上下文足够，64 轮约等于 32 次问答全程可回忆",
+  "proactive_llm": true,
+  "proactive_llm_daily_max": 2,
+  "_proactive_note": "主动说话：45 次新曝光 + 30 分钟间隔 + 日 3 条；其中每天最多 2 条走 LLM（带人格与近期对话上下文），LLM 失败或超额退回模板句"
+}

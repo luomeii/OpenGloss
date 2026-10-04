@@ -1,0 +1,898 @@
+{
+  "version": "0.3.0",
+  "generated": "2026-10-01",
+  "note": "PAE 能力面单一真相源。内置 companion 与外部智能体（Claude Code / Cursor / 其他 MCP 客户端 / 你的脚本）走同一份清单、同一套守门、同一份配额。status=planned 的能力只有设计没有实现——这是防「图纸当房子」的诚实标注。",
+  "transports": [
+    {
+      "name": "http",
+      "path": "/v1/cap/{name}",
+      "manifest": "/v1/cap/manifest"
+    },
+    {
+      "name": "mcp",
+      "status": "implemented",
+      "note": "由 mcp_server.py 提供（stdio）；tools/list 返回同一份清单（实测 41 工具，t18_mcp.json PASS）"
+    },
+    {
+      "name": "skill",
+      "path": "skills/pae-bridge/SKILL.md",
+      "status": "implemented",
+      "note": "由本清单生成；快照见 skills/pae-bridge/SKILL.md（权威清单以本文件为准）"
+    }
+  ],
+  "auth": {
+    "header": "X-PAE-Key",
+    "note": "不带头 = local（用户本机扩展，保持向后兼容）；带头则必须匹配 keys.json 中的 sha256，否则 401",
+    "scopes": [
+      "read",
+      "write",
+      "admin"
+    ]
+  },
+  "capabilities": [
+    {
+      "name": "pae.health",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "引擎存活检查",
+      "params": {},
+      "returns": "{ok: bool}",
+      "http": {
+        "method": "GET",
+        "path": "/v1/health"
+      }
+    },
+    {
+      "name": "pae.annotate",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "appends_events",
+      "description": "给一段文本返回注解（含记账：写入 encounter 事件）",
+      "params": {
+        "text": {
+          "type": "string",
+          "required": true,
+          "description": "待注解文本"
+        },
+        "page_id": {
+          "type": "string",
+          "description": "页面标识（幂等键的一部分）"
+        },
+        "session_id": {
+          "type": "string",
+          "description": "会话标识（会话阻尼 ρ 用）"
+        }
+      },
+      "returns": "[{surface, lemma, gloss, s_value, counted}]",
+      "http": {
+        "method": "POST",
+        "path": "/v1/annotate"
+      },
+      "alias_of": "/v1/annotate"
+    },
+    {
+      "name": "pae.status",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "学习状态总览（事件数/词表规模/高频掌握词）",
+      "params": {},
+      "returns": "{events, lexicon, top_words}",
+      "http": {
+        "method": "GET",
+        "path": "/v1/status"
+      }
+    },
+    {
+      "name": "pae.config",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "当前生效配置（只读）",
+      "params": {},
+      "returns": "config.json 内容",
+      "http": {
+        "method": "GET",
+        "path": "/v1/config"
+      }
+    },
+    {
+      "name": "pae.event",
+      "kind": "inform",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "appends_events",
+      "description": "上报观察/交互事件（annotation_shown / hover / known_click）——三证据的发射口",
+      "params": {
+        "type": {
+          "type": "string",
+          "required": true,
+          "enum": [
+            "annotation_shown",
+            "hover",
+            "known_click"
+          ]
+        },
+        "lemma": {
+          "type": "string",
+          "required": true
+        },
+        "surface": {
+          "type": "string"
+        },
+        "page_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "s_value": {
+          "type": "number"
+        },
+        "page_active_ms": {
+          "type": "integer",
+          "description": "页面活跃时长（ms）——熟悉度投影的「合格曝光」口径"
+        }
+      },
+      "returns": "{ok, counted, s_value}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/event"
+      }
+    },
+    {
+      "name": "pae.persona",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "读取人格参数与渲染后的提示词——外部智能体扮演同一角色所必需",
+      "params": {},
+      "returns": "{params, bands, prompt}",
+      "http": {
+        "method": "GET",
+        "path": "/v1/persona"
+      }
+    },
+    {
+      "name": "pae.persona.preview",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "用给定参数渲染提示词（不落盘）",
+      "params": {
+        "params": {
+          "type": "object",
+          "required": true
+        }
+      },
+      "returns": "{prompt, bands, issues}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/persona/preview"
+      }
+    },
+    {
+      "name": "pae.persona.update",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "writes_persona",
+      "description": "保存人格参数（本机面板用；外部 actor 走同一守门）",
+      "params": {
+        "params": {
+          "type": "object",
+          "required": true
+        }
+      },
+      "returns": "{ok, issues, saved_to}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/persona"
+      }
+    },
+    {
+      "name": "pae.persona.say",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "calls_llm",
+      "description": "用当前人格说一句（面板试说/主动推送都走这里）",
+      "params": {
+        "stimulus": {
+          "type": "string",
+          "required": true
+        },
+        "params": {
+          "type": "object"
+        },
+        "context_block": {
+          "type": "string"
+        }
+      },
+      "returns": "{reply, elapsed_ms, model, usage}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/persona/say"
+      }
+    },
+    {
+      "name": "pae.context",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "完整上下文装配（L0–L6；1M 策略=默认全量装载，超限按固定顺序渐进裁剪）",
+      "params": {
+        "scope": {
+          "type": "string"
+        },
+        "top_n": {
+          "type": "integer",
+          "default": 40
+        },
+        "days": {
+          "type": "integer",
+          "default": 7
+        },
+        "include": {
+          "type": "array"
+        },
+        "max_tokens": {
+          "type": "integer",
+          "default": 200000
+        },
+        "page": {
+          "type": "object"
+        }
+      },
+      "returns": "{persona, learner, words, metrics, page, limits, budget_tokens}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.context"
+      }
+    },
+    {
+      "name": "pae.word",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "单词状态（S 值/遭遇次数/释义/是否在带内）",
+      "params": {
+        "lemma": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "returns": "{lemma, s_value, encounters, gloss, in_band}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.word"
+      }
+    },
+    {
+      "name": "pae.trend",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "掌握度趋势",
+      "params": {
+        "days": {
+          "type": "integer",
+          "default": 7
+        }
+      },
+      "returns": "{days, series}"
+    },
+    {
+      "name": "pae.grammar",
+      "kind": "observe",
+      "status": "stub",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "语法点状态（**未实现**：如实返回 not_tracked，不装）——23号⑦设计稿，25号种子资源已备",
+      "params": {
+        "point_id": {
+          "type": "string"
+        }
+      },
+      "returns": "{point_id, state}"
+    },
+    {
+      "name": "pae.events",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "原始事件查询",
+      "params": {
+        "lemma": {
+          "type": "string"
+        },
+        "days": {
+          "type": "integer"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "returns": "[{ts, type, payload}]",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.events"
+      }
+    },
+    {
+      "name": "pae.decisions",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "决策日志：谁（哪个 actor）因为什么改了哪个变量、改前改后、门控结果与效果",
+      "params": {
+        "actor": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "default": 20
+        }
+      },
+      "returns": "[{ts, actor, capability, ok}]",
+      "http": {
+        "method": "GET",
+        "path": "/v1/cap/pae.decisions"
+      }
+    },
+    {
+      "name": "pae.page",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "页面现场（当前 URL/已注解词/选区）",
+      "params": {
+        "url": {
+          "type": "string"
+        },
+        "annotated": {
+          "type": "array"
+        },
+        "selection": {
+          "type": "string"
+        }
+      },
+      "returns": "{url, annotated, selection}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.page"
+      }
+    },
+    {
+      "name": "pae.metrics",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "引擎表现指标（曝光/悬停/点击/预算利用率/被忽略 Top 词）——反馈闭环的输入",
+      "params": {
+        "range": {
+          "type": "string",
+          "enum": [
+            "7d",
+            "30d"
+          ],
+          "default": "7d"
+        }
+      },
+      "returns": "{encounters_7d, new_lemmas_7d, band_population, annotation_exposure, hover_rate, click_rate, budget_utilization, top_ignored_words}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.metrics"
+      }
+    },
+    {
+      "name": "pae.memory.search",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "长期记忆检索（facts 表）",
+      "params": {
+        "query": {
+          "type": "string"
+        },
+        "k": {
+          "type": "integer",
+          "default": 5
+        }
+      },
+      "returns": "[{fact_id, kind, text, confidence}]"
+    },
+    {
+      "name": "pae.memory.recent",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "最近对话（关引擎重开仍可取回）",
+      "params": {
+        "session_id": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "default": 10
+        }
+      },
+      "returns": "[{turn_id, role, text, ts}]"
+    },
+    {
+      "name": "pae.propose",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "changes_params",
+      "description": "参数变更提案（JSON Patch 方言 + 依据清单；走三层守门，可回滚）",
+      "params": {
+        "patch": {
+          "type": "array",
+          "required": true
+        },
+        "rationale": {
+          "type": "string",
+          "required": true
+        },
+        "evidence": {
+          "type": "array"
+        },
+        "ttl_days": {
+          "type": "integer"
+        }
+      },
+      "returns": "{decision_id, applied, gate_result}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.propose"
+      }
+    },
+    {
+      "name": "pae.pin",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "appends_events",
+      "description": "标记「认识了」（写 user_pin/known_click 事件）",
+      "params": {
+        "lemma": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "returns": "{ok, s_value}"
+    },
+    {
+      "name": "pae.remember",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "writes_facts",
+      "description": "写一条长期记忆（必须带 evidence，无证据不收）",
+      "params": {
+        "kind": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string",
+          "required": true
+        },
+        "evidence": {
+          "type": "array",
+          "required": true
+        }
+      },
+      "returns": "{fact_id, ok}"
+    },
+    {
+      "name": "pae.forget",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "supersedes_fact",
+      "description": "撤销一条记忆（superseded_by 语义，不物理删除）",
+      "params": {
+        "fact_id": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "returns": "{ok}"
+    },
+    {
+      "name": "pae.say",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "pushes_to_page",
+      "description": "往页面推一条角色消息（受 proactivity 与每日上限约束）",
+      "params": {
+        "text": {
+          "type": "string",
+          "required": true
+        },
+        "anchor": {
+          "type": "string"
+        }
+      },
+      "returns": "{ok, delivered}"
+    },
+    {
+      "name": "pae.hint",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "changes_this_render",
+      "description": "在页面上强化/弱化某词（不改 S，只改本次渲染）",
+      "params": {
+        "lemma": {
+          "type": "string",
+          "required": true
+        },
+        "level": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down"
+          ]
+        }
+      },
+      "returns": "{ok}"
+    },
+    {
+      "name": "pae.session.open",
+      "kind": "session",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "writes_session",
+      "description": "开一个会话，返回 session_id",
+      "params": {
+        "actor": {
+          "type": "string"
+        }
+      },
+      "returns": "{session_id}"
+    },
+    {
+      "name": "pae.session.turn",
+      "kind": "session",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "writes_turn",
+      "description": "追加一轮对话",
+      "params": {
+        "session_id": {
+          "type": "string",
+          "required": true
+        },
+        "role": {
+          "type": "string",
+          "required": true
+        },
+        "text": {
+          "type": "string",
+          "required": true
+        },
+        "refs": {
+          "type": "array"
+        }
+      },
+      "returns": "{turn_id}"
+    },
+    {
+      "name": "pae.session.close",
+      "kind": "session",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "writes_session",
+      "description": "结束会话（可选摘要）",
+      "params": {
+        "session_id": {
+          "type": "string",
+          "required": true
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "returns": "{ok}"
+    },
+    {
+      "name": "pae.push.log",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "角色对我说过什么（推送审计：含被每日上限拦下的）",
+      "params": {
+        "n": {
+          "type": "integer",
+          "default": 20
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "returns": "[{ts, kind, payload, actor, blocked, reason}]",
+      "http": {
+        "method": "GET",
+        "path": "/v1/push/log"
+      }
+    },
+    {
+      "name": "pae.params",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "当前变量：覆盖层 + 有效值 + 默认值 + 取值范围（AI 改了什么都看得见）",
+      "params": {},
+      "returns": "{overrides, effective, defaults, ranges}",
+      "http": {
+        "method": "GET",
+        "path": "/v1/cap/pae.params"
+      }
+    },
+    {
+      "name": "pae.agent.tick",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "calls_llm_and_acts",
+      "description": "让内置角色跑一轮：观察状态 → LLM 判断 → 通过能力面行动 → 全程留痕（agent_log 可读它的 thought）。这是「AI 智能元素」的循环本体",
+      "params": {
+        "actor": {
+          "type": "string",
+          "default": "companion"
+        },
+        "stimulus": {
+          "type": "string",
+          "description": "可选：给它一句话情境"
+        }
+      },
+      "returns": "{actor, thought, actions, error, elapsed_ms, usage}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.agent.tick"
+      }
+    },
+    {
+      "name": "pae.agent.log",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "它想过什么、做了什么（透明：你能看见 AI 的判断过程）",
+      "params": {
+        "n": {
+          "type": "integer",
+          "default": 20
+        }
+      },
+      "returns": "[{ts, actor, stimulus, thought, result, elapsed_ms}]",
+      "http": {
+        "method": "GET",
+        "path": "/v1/cap/pae.agent.log"
+      }
+    },
+    {
+      "name": "pae.audit",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "调用审计：谁调用了哪项能力、成功与否（含被拒的尝试）——「哪个智能体在动我的系统」",
+      "params": {
+        "actor": {
+          "type": "string"
+        },
+        "n": {
+          "type": "integer",
+          "default": 20
+        }
+      },
+      "returns": "[{ts, actor, capability, ok, detail}]",
+      "http": {
+        "method": "GET",
+        "path": "/v1/cap/pae.audit"
+      }
+    },
+    {
+      "name": "pae.permissions",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "权限矩阵：每个 actor 能做什么、限制是什么（校准结果摆出来，用户可查）",
+      "params": {},
+      "returns": "{principle, actors, act_limits}",
+      "http": {
+        "method": "GET",
+        "path": "/v1/cap/pae.permissions"
+      }
+    },
+    {
+      "name": "pae.agent.schedule",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "AI 主动巡检的调度状态（是否开启、上次何时跑、今天几次、下次该不该跑）",
+      "params": {},
+      "returns": "{enabled, config, last_tick_ts, ticks_today, would_tick_now, reason}",
+      "http": {
+        "method": "GET",
+        "path": "/v1/cap/pae.agent.schedule"
+      }
+    },
+    {
+      "name": "pae.agent.schedule.set",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "starts_scheduler",
+      "description": "开启/关闭 AI 主动巡检（**只有用户能开**；AI 不能给自己开）",
+      "params": {
+        "enabled": {
+          "type": "boolean",
+          "required": true
+        },
+        "interval_min": {
+          "type": "integer"
+        },
+        "min_new_events": {
+          "type": "integer"
+        }
+      },
+      "returns": "{ok, config}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.agent.schedule.set"
+      }
+    },
+    {
+      "name": "pae.key.issue",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "issues_key",
+      "description": "签发外部智能体的 key（**只有用户能签发**；明文只返回一次）",
+      "params": {
+        "name": {
+          "type": "string",
+          "required": true,
+          "description": "如 ext:claude-code"
+        }
+      },
+      "returns": "{actor, key}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.key.issue"
+      }
+    },
+    {
+      "name": "pae.outcomes",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "none",
+      "description": "**结果侧指标（尺子）**：至少 eval_days 天前被注解过的词里，后来真的点过「认识了」的比例；并回填每次参数变更的前后效果",
+      "params": {
+        "eval_days": {
+          "type": "integer",
+          "default": 7
+        },
+        "evaluate_decisions": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "returns": "{cohort_size, converted, conversion_rate, engagement_rate, median_days_to_known, decision_effects}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.outcomes"
+      }
+    },
+    {
+      "name": "pae.familiarity",
+      "kind": "observe",
+      "status": "implemented",
+      "scope": "read",
+      "side_effect": "writes_projection",
+      "description": "熟悉度投影（35号）：谁会被「无视即熟悉」豁免、为什么；默认 shadow 模式（只记录不生效）",
+      "params": {
+        "recompute": {
+          "type": "boolean",
+          "default": true
+        },
+        "limit": {
+          "type": "integer",
+          "default": 20
+        }
+      },
+      "returns": "{mode, enforce_active, would_exempt, near_miss, rule_version}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.familiarity"
+      }
+    },
+    {
+      "name": "pae.familiarity.restore",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "writes_override",
+      "description": "一键恢复：让某个词重新被注解（写 revoke 覆盖 + 30 天冷却，尊重人工信号）",
+      "params": {
+        "lemma": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "returns": "{restored, cooldown_days}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.familiarity.restore"
+      }
+    },
+    {
+      "name": "pae.sensejudge",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "calls_llm_and_caches",
+      "description": "义项判定（P5 影子期）：对给定词+句子跑一次 LLM 义项判定，**只写缓存与决策日志，不改上屏内容**",
+      "params": {
+        "lemma": {
+          "type": "string"
+        },
+        "sentence": {
+          "type": "string"
+        },
+        "stats_only": {
+          "type": "boolean"
+        }
+      },
+      "returns": "{chosen_idx, baseline_idx, latency_ms, fallback, reason} 或统计",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.sensejudge"
+      }
+    },
+    {
+      "name": "pae.mute",
+      "kind": "act",
+      "status": "implemented",
+      "scope": "write",
+      "side_effect": "toggles_mute",
+      "description": "静音开关（读写）：静音时引擎侧主动说话（规则版）与推送一并安静；扩展「静音」按钮经此同步",
+      "params": {
+        "muted": {
+          "type": "boolean"
+        }
+      },
+      "returns": "{muted}",
+      "http": {
+        "method": "POST",
+        "path": "/v1/cap/pae.mute"
+      }
+    }
+  ]
+}
