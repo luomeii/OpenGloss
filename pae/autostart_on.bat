@@ -38,8 +38,9 @@ exit /b 1
 
 set "PAE_VBS=%~dp0autostart_hidden.vbs"
 rem --- write the hidden launcher (python is resolved from PATH at logon) ---
-> "%PAE_VBS%" echo Set sh = CreateObject("WScript.Shell")
->> "%PAE_VBS%" echo sh.CurrentDirectory = "%~dp0"
+> "%PAE_VBS%" echo Set fso = CreateObject("Scripting.FileSystemObject")
+>> "%PAE_VBS%" echo Set sh = CreateObject("WScript.Shell")
+>> "%PAE_VBS%" echo sh.CurrentDirectory = fso.GetParentFolderName(WScript.ScriptFullName)
 >> "%PAE_VBS%" echo sh.Run "python -m uvicorn pae_core.api:app --port 4815", 0, False
 if not exist "%PAE_VBS%" ( echo [PAE] ERROR: could not write the launcher. & pause & exit /b 1 )
 echo [PAE] launcher written: %PAE_VBS%
