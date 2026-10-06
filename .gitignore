@@ -2,6 +2,9 @@
 pae/pae.db*
 pae/keys.json
 
+# autostart_on.bat 在本机生成的隐藏启动器（内容是本机绝对路径，不入库）
+autostart_hidden.vbs
+
 # 备份与测试日志（backup.bat / nightly.py 的产物；含个人学习数据副本，绝不入库）
 pae/backups/
 pae/tests/nightly_log.txt
