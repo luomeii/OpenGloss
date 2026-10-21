@@ -4,7 +4,10 @@
 - BUS：进程内广播（SSE 订阅者各自一个队列）
 - say/hint 都落 push_log（用户能看见「AI 对我说过什么」），并受 daily_say_cap 约束
 """
+from . import health
+from .db_access import access, guarded
 import json
+from .paths import config_path
 import queue
 import threading
 import time
@@ -57,23 +60,15 @@ def _today_start():
     return _day_start()
 
 
+@guarded
 def today_count(conn, kind, now=None):
     return conn.execute("SELECT COUNT(*) FROM push_log WHERE kind = ? AND ts >= ? AND blocked = 0",
                         (kind, _day_start(now))).fetchone()[0]
 
 
 def _engine_write_lock(conn):
-    """H3/M5 修复（评审 2026-10-03）：共享 SQLite 连接上事务边界属于连接不属于线程，
-    多线程并发写会互相提交对方事务（提前落地）并撞语句缓存产生 API misuse 硬异常。
-    写路径统一过引擎锁——engine 侧 record_event/annotate 已是这个纪律，push 侧补齐。
-    拿不到引擎（独立测试库）就退回无锁（单线程测试安全）。"""
-    try:
-        from .engine import get_engine
-        if get_engine().conn is conn:
-            return get_engine().lock
-    except Exception:
-        pass
-    return None
+    """Use the connection owner without resolving the Engine singleton."""
+    return getattr(conn, "access_lock", None)
 
 
 class _NullLock:
@@ -92,7 +87,9 @@ def _write_lock(conn):
     return lk if lk is not None else _NULL_LOCK
 
 
+@guarded
 def _log(conn, kind, payload, actor, blocked=False, reason="", ts=None):
+    health.require_clean(conn)
     with _write_lock(conn):
         conn.execute("INSERT INTO push_log(ts, kind, payload, actor, blocked, reason) VALUES(?,?,?,?,?,?)",
                      (int(ts if ts is not None else time.time()), kind,
@@ -101,6 +98,7 @@ def _log(conn, kind, payload, actor, blocked=False, reason="", ts=None):
         conn.commit()
 
 
+@guarded
 def say(conn, actor, text, anchor="", cap=None, meta=None, ts=None):
     """往页面说一句。受每日上限约束（默认取 params 的 daily_say_cap）。
 
@@ -108,6 +106,7 @@ def say(conn, actor, text, anchor="", cap=None, meta=None, ts=None):
           这样「今天主动说了几条」能直接查账，不必另开表）。
     ts：仅测试/离线回放用；生产走真实时间。
     """
+    health.require_clean(conn)
     text = (text or "").strip()
     if not text:
         return False, {"error": "empty_text"}
@@ -136,30 +135,45 @@ def say(conn, actor, text, anchor="", cap=None, meta=None, ts=None):
         conn.execute("INSERT INTO push_log(ts, kind, payload, actor, blocked, reason) VALUES(?,?,?,?,?,?)",
                      (ev["ts"], "say", json.dumps(ev, ensure_ascii=False), actor, 0, ""))
         conn.commit()
-    BUS.publish(ev)
+    gate = getattr(conn, "health", None)
+    if gate is None:
+        BUS.publish(ev)
+    else:
+        gate.publish(BUS.publish, ev)
     return True, {"delivered": True, "subscribers": BUS.subscriber_count(), "sent_today": n + 1, "cap": cap}
 
 
+@guarded
 def hint(conn, actor, lemma, level="up"):
     """在页面上强化/弱化某词（不改 S，只改本次渲染）。"""
     if level not in ("up", "down"):
         return False, {"error": "bad_level", "allowed": ["up", "down"]}
     ev = {"type": "hint", "lemma": lemma, "level": level, "actor": actor, "ts": int(time.time())}
     _log(conn, "hint", ev, actor)
-    BUS.publish(ev)
+    gate = getattr(conn, "health", None)
+    if gate is None:
+        BUS.publish(ev)
+    else:
+        gate.publish(BUS.publish, ev)
     return True, {"delivered": True, "subscribers": BUS.subscriber_count()}
 
 
+@guarded
 def notify(conn, kind, payload, actor="system"):
     """参数变更/决策回滚等系统事件也走同一条推送（角色能告知「我把密度调低了」）。"""
     ev = dict(payload or {})
     ev["type"] = kind
     ev["ts"] = int(time.time())
     _log(conn, kind, ev, actor)
-    BUS.publish(ev)
+    gate = getattr(conn, "health", None)
+    if gate is None:
+        BUS.publish(ev)
+    else:
+        gate.publish(BUS.publish, ev)
     return ev
 
 
+@guarded
 def log(conn, n=20, kind=None):
     sql = "SELECT ts, kind, payload, actor, blocked, reason FROM push_log"
     args = []
@@ -228,8 +242,7 @@ PROACTIVE_LLM_DAILY_MAX = 2
 
 def _cfg(key, default):
     try:
-        return json.loads((Path(__file__).resolve().parents[1] / "config.json")
-                          .read_text(encoding="utf-8")).get(key, default)
+        return json.loads(config_path().read_text(encoding="utf-8")).get(key, default)
     except Exception:
         return default
 
@@ -245,6 +258,7 @@ def _llm_enabled():
         return True
 
 
+@guarded
 def _proactive_llm_count(conn, since_ts):
     """今天走了 LLM 的主动说话条数（payload 里 llm=1）。"""
     sql = "SELECT COUNT(*) FROM push_log WHERE kind='say' AND blocked=0 AND ts >= ?"
@@ -287,6 +301,7 @@ def _proactive_llm_text(conn, picked):
 _PROACTIVE_STATE = {"last_eval": 0.0, "last_result": None}
 
 
+@guarded
 def _proactive_count(conn, since_ts):
     """今天（ts >= since_ts）主动说了几条。判定依据：payload 里的 proactive=true。"""
     sql = "SELECT COUNT(*) FROM push_log WHERE kind='say' AND blocked=0 AND ts >= ?"
@@ -298,6 +313,7 @@ def _proactive_count(conn, since_ts):
                                 (int(since_ts),)).fetchone()[0])
 
 
+@guarded
 def _last_proactive_ts(conn):
     """上次主动说话的 ts（没有则 None）——条件 ① 的计数起点、条件 ② 的间隔起点。"""
     sql = "SELECT MAX(ts) FROM push_log WHERE kind='say' AND blocked=0"
@@ -307,6 +323,7 @@ def _last_proactive_ts(conn):
         return conn.execute(sql + " AND payload LIKE '%\"proactive\": true%'").fetchone()[0]
 
 
+@guarded
 def is_muted(conn):
     """用户是否静音过：读最新一条 kind='mute' 标记，没有标记 = 没静音。"""
     try:
@@ -322,6 +339,7 @@ def is_muted(conn):
         return False
 
 
+@guarded
 def set_muted(conn, muted=True, actor="user", ts=None):
     """写下/解除静音标记（落 push_log，可审计：谁在什么时候让她闭嘴了）。
 
@@ -335,6 +353,7 @@ def set_muted(conn, muted=True, actor="user", ts=None):
 PROACTIVE_POOL_SIZE = 60     # 「最近在啃」的取样宽度（见注释 ⑥：12 太窄，全是生词）
 
 
+@guarded
 def _pick_proactive_word(engine):
     """从「最近在啃」的词里挑 S 涨得最快的（规则排序，不调 LLM）。挑不出返回 None。"""
     from . import observe as obs_mod
@@ -371,6 +390,8 @@ def maybe_proactive(conn, engine=None, now=None):
     """
     now = int(now if now is not None else time.time())
     try:
+        with access(conn):
+            health.require_clean(conn)
         if now - float(_PROACTIVE_STATE.get("last_eval") or 0.0) < PROACTIVE_EVAL_INTERVAL_S:
             return {"sent": False, "reason": "eval_throttled", "skipped": "eval_throttled", "now": now}
         _PROACTIVE_STATE["last_eval"] = now
@@ -402,10 +423,15 @@ def maybe_proactive(conn, engine=None, now=None):
         if _llm_enabled() and _proactive_llm_count(conn, _day_start(now)) < PROACTIVE_LLM_DAILY_MAX:
             try:
                 text = _proactive_llm_text(conn, picked)
+                with access(conn):
+                    health.require_clean(conn)
                 used_llm = bool(text)
+            except health.EngineUnavailable:
+                raise
             except Exception:
                 text = None
                 used_llm = False
+        health.check(conn)
         if not text:
             text = PROACTIVE_TEMPLATE % (lemma, n_enc)
         meta = {"proactive": True, "lemma": lemma, "encounters": n_enc,

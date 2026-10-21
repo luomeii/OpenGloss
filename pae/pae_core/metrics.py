@@ -3,6 +3,9 @@
 
 设计：不新增存储，一切从 events 推导（事件溯源的红利）。
 """
+from . import health
+from .db_access import access, guarded, batched_rows
+from .read_snapshot import read_snapshot
 import json
 import time
 
@@ -14,17 +17,35 @@ def _payload(row):
         return {}
 
 
+@guarded
 def _rows(conn, since):
     return conn.execute(
         "SELECT ts, type, payload FROM events WHERE ts >= ? ORDER BY ts ASC", (since,)
     ).fetchall()
 
 
-def compute(conn, days=7, min_exposure=3, top_n=10):
-    """返回指标字典。days=统计窗口天数。"""
+@guarded
+def _metric_inputs(conn, days=7):
     now = int(time.time())
+    rows = _rows(conn, now - days * 86400)
+    first_rows = conn.execute(
+        "SELECT MIN(ts), json_extract(payload, '$.lemma') FROM events"
+        " WHERE type='encounter' GROUP BY json_extract(payload, '$.lemma')").fetchall()
+    return now, rows, first_rows
+
+
+def compute(conn, days=7, min_exposure=3, top_n=10):
+    with read_snapshot(conn) as reader:
+        inputs = _metric_inputs(reader, days)
+    result = _compute_from_inputs(inputs, days, min_exposure, top_n)
+    health.check(conn)
+    return result
+
+
+def _compute_from_inputs(inputs, days=7, min_exposure=3, top_n=10):
+    """返回指标字典。days=统计窗口天数。"""
+    now, rows, first_rows = inputs
     since = now - days * 86400
-    rows = _rows(conn, since)
 
     enc = 0
     exposure = {}   # lemma -> 曝光数
@@ -53,9 +74,7 @@ def compute(conn, days=7, min_exposure=3, top_n=10):
 
     # 新词：首次遭遇落在窗口内
     first_seen = {}
-    for ts, lemma in conn.execute(
-            "SELECT MIN(ts), json_extract(payload, '$.lemma') FROM events"
-            " WHERE type='encounter' GROUP BY json_extract(payload, '$.lemma')"):
+    for ts, lemma in first_rows:
         if lemma:
             first_seen[lemma] = ts
     new_lemmas = [w for w, ts in first_seen.items() if ts and ts >= since]
@@ -118,9 +137,14 @@ def band_population(states, params):
 # ---------------------------------------------------------------------------
 
 def _first_exposure(conn):
-    """每个词第一次被注解展示的时间。"""
+    with access(conn):
+        rows = conn.execute("SELECT ts, payload FROM events WHERE type = 'annotation_shown'").fetchall()
+    return _first_exposure_from_rows(rows)
+
+
+def _first_exposure_from_rows(rows):
     out = {}
-    for ts, payload in conn.execute("SELECT ts, payload FROM events WHERE type = 'annotation_shown'"):
+    for ts, payload in rows:
         try:
             lemma = json.loads(payload or "{}").get("lemma")
         except Exception:
@@ -133,9 +157,14 @@ def _first_exposure(conn):
 
 
 def _action_times(conn, etype):
-    """每个词某类行为的时间列表。"""
+    with access(conn):
+        rows = conn.execute("SELECT ts, payload FROM events WHERE type = ?", (etype,)).fetchall()
+    return _action_times_from_rows(rows)
+
+
+def _action_times_from_rows(rows):
     out = {}
-    for ts, payload in conn.execute("SELECT ts, payload FROM events WHERE type = ?", (etype,)):
+    for ts, payload in rows:
         try:
             lemma = json.loads(payload or "{}").get("lemma")
         except Exception:
@@ -145,7 +174,36 @@ def _action_times(conn, etype):
     return out
 
 
+@guarded
+def _outcome_inputs(conn):
+    now = int(time.time())
+    first = conn.execute("SELECT ts, payload FROM events WHERE type = 'annotation_shown'").fetchall()
+    known = conn.execute("SELECT ts, payload FROM events WHERE type = ?", ("known_click",)).fetchall()
+    hover = conn.execute("SELECT ts, payload FROM events WHERE type = ?", ("hover",)).fetchall()
+    try:
+        effects = conn.execute("SELECT effect_result FROM decisions WHERE effect_result IS NOT NULL").fetchall()
+    except Exception:
+        effects = []
+    try:
+        pushes = conn.execute("SELECT COUNT(*) FROM push_log WHERE ts >= ?", (now - 7 * 86400,)).fetchone()[0]
+        buckets = conn.execute(
+            "SELECT COUNT(DISTINCT COALESCE(json_extract(payload,'$.page_id'),'') || '|' || (ts/3600))"
+            " FROM events WHERE type='annotation_shown' AND ts >= ?", (now - 7 * 86400,)).fetchone()[0]
+    except Exception:
+        pushes, buckets = 0, 0
+    return now, first, known, hover, effects, pushes, buckets
+
+
 def compute_outcomes(conn, eval_days=7, cohort_max_days=30, early_max_days=14, early_lag_days=3):
+    with read_snapshot(conn) as reader:
+        inputs = _outcome_inputs(reader)
+    result = _compute_outcomes_from_inputs(inputs, eval_days, cohort_max_days,
+                                          early_max_days, early_lag_days)
+    health.check(conn)
+    return result
+
+
+def _compute_outcomes_from_inputs(inputs, eval_days=7, cohort_max_days=30, early_max_days=14, early_lag_days=3):
     """结果侧指标。
 
     cohort = 首次曝光发生在 [now-cohort_max_days, now-eval_days] 的词
@@ -158,12 +216,12 @@ def compute_outcomes(conn, eval_days=7, cohort_max_days=30, early_max_days=14, e
     early_conversion_rate 与 conversion_rate **同口径**（队列里后来点过 known_click 的比例），
     只是窗口更短：样本小、波动大，只能当**先行趋势**读，替代不了北极星。
     """
-    now = int(time.time())
+    now, first_rows, known_rows, hover_rows, effects, pushes, buckets = inputs
     low = now - cohort_max_days * 86400
     high = now - eval_days * 86400
-    first = _first_exposure(conn)
-    known = _action_times(conn, "known_click")
-    hover = _action_times(conn, "hover")
+    first = _first_exposure_from_rows(first_rows)
+    known = _action_times_from_rows(known_rows)
+    hover = _action_times_from_rows(hover_rows)
 
     cohort = {w: t for w, t in first.items() if low <= t <= high}
     converted, engaged, silent, days_to_known = [], [], [], []
@@ -193,7 +251,7 @@ def compute_outcomes(conn, eval_days=7, cohort_max_days=30, early_max_days=14, e
     # 决策有效率（设计评审指定的三数字之一）：已评估的决策里「有改善」的比例
     win_rate = None
     try:
-        rows = list(conn.execute("SELECT effect_result FROM decisions WHERE effect_result IS NOT NULL"))
+        rows = effects
         good = sum(1 for (e,) in rows if e and "better" in str(e))
         bad = sum(1 for (e,) in rows if e and "worse" in str(e))
         win_rate = round(good / (good + bad), 3) if (good + bad) else None
@@ -203,11 +261,6 @@ def compute_outcomes(conn, eval_days=7, cohort_max_days=30, early_max_days=14, e
     # 打扰率（三数字之三）：每阅读小时它开口几次。红线的量化看门狗，升即停。
     interrupt = None
     try:
-        pushes = conn.execute("SELECT COUNT(*) FROM push_log WHERE ts >= ?",
-                              (now - 7 * 86400,)).fetchone()[0]
-        buckets = conn.execute(
-            "SELECT COUNT(DISTINCT COALESCE(json_extract(payload,'$.page_id'),'') || '|' || (ts/3600))"
-            " FROM events WHERE type='annotation_shown' AND ts >= ?", (now - 7 * 86400,)).fetchone()[0]
         hours = (buckets or 0) / 7.0
         interrupt = round(pushes / hours, 3) if hours >= 1 else None
     except Exception:
@@ -241,6 +294,7 @@ def compute_outcomes(conn, eval_days=7, cohort_max_days=30, early_max_days=14, e
     }
 
 
+@guarded
 def evaluate_decisions(conn, window_days=7, limit=20):
     """给每次已生效的参数变更算「改前 vs 改后」的效果，并写回 decisions.effect_result。
 
@@ -256,22 +310,24 @@ def evaluate_decisions(conn, window_days=7, limit=20):
         w = int(window_days) * 86400
         before = {"exposure": 0, "hover": 0, "click": 0}
         after_m = {"exposure": 0, "hover": 0, "click": 0}
-        for t, etype in conn.execute(
-                "SELECT ts, type FROM events WHERE ts >= ? AND ts < ?", (ts - w, ts)):
-            if etype == "annotation_shown":
-                before["exposure"] += 1
-            elif etype == "hover":
-                before["hover"] += 1
-            elif etype == "known_click":
-                before["click"] += 1
-        for t, etype in conn.execute(
-                "SELECT ts, type FROM events WHERE ts >= ? AND ts < ?", (ts, ts + w)):
-            if etype == "annotation_shown":
-                after_m["exposure"] += 1
-            elif etype == "hover":
-                after_m["hover"] += 1
-            elif etype == "known_click":
-                after_m["click"] += 1
+        with batched_rows(conn,
+                "SELECT ts, type FROM events WHERE ts >= ? AND ts < ?", (ts - w, ts)) as events:
+            for t, etype in events:
+                if etype == "annotation_shown":
+                    before["exposure"] += 1
+                elif etype == "hover":
+                    before["hover"] += 1
+                elif etype == "known_click":
+                    before["click"] += 1
+        with batched_rows(conn,
+                "SELECT ts, type FROM events WHERE ts >= ? AND ts < ?", (ts, ts + w)) as events:
+            for t, etype in events:
+                if etype == "annotation_shown":
+                    after_m["exposure"] += 1
+                elif etype == "hover":
+                    after_m["hover"] += 1
+                elif etype == "known_click":
+                    after_m["click"] += 1
 
         def rate(m):
             return round(m["hover"] / m["exposure"], 3) if m["exposure"] else None

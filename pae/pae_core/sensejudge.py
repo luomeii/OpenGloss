@@ -6,6 +6,8 @@
 - 失败零可见：超时/坏 JSON/越界 → 保持确定性释义，不重试不提示
 - 候选义项从 dict.sqlite 现场取全文（内存里的精简释义不够判）
 """
+from . import health
+from .db_access import access, guarded
 import hashlib
 import json
 import re
@@ -52,6 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_sense_shadow_ts ON sense_shadow_log(ts);
 """
 
 
+@guarded
 def ensure_tables(conn):
     conn.executescript(DDL)
     conn.commit()
@@ -106,6 +109,7 @@ def prefilter(lemma, candidates, cached=None):
     return True, "worth_llm"
 
 
+@guarded
 def _calls_today(conn):
     day0 = int(time.time()) // 86400 * 86400
     return conn.execute("SELECT COUNT(*) FROM sense_shadow_log WHERE ts >= ? AND fallback = 0",
@@ -121,6 +125,7 @@ def _judge_prompt(lemma, sentence, candidates):
     return sys, user
 
 
+@guarded
 def _log(conn, out, key_level):
     conn.execute(
         "INSERT INTO sense_shadow_log(ts, lemma, ctx_hash, key_level, chosen_idx, baseline_idx, n_candidates,"
@@ -132,41 +137,43 @@ def _log(conn, out, key_level):
 
 def judge(conn, dict_path, lemma, sentence, llm_chat=None):
     """影子判定一次（不抛异常）。llm_chat 可注入替身便于测试。"""
-    ensure_tables(conn)
-    out = {"lemma": lemma, "ts": int(time.time()), "fallback": 0, "reason": None,
-           "chosen_idx": None, "baseline_idx": 0, "n_candidates": 0, "latency_ms": 0,
-           "ctx_hash": None, "prompt_version": PROMPT_VERSION}
     cands = full_candidates(dict_path, lemma)
-    out["n_candidates"] = len(cands)
-    fp = hashlib.sha1(("|".join(cands)).encode("utf-8")).hexdigest()[:12] if cands else ""
-    h2 = ctx_hash_sentence(lemma, sentence)
-    h1 = ctx_hash_collocation(lemma, sentence)
-    out["ctx_hash"] = h2
-    cached = conn.execute("SELECT chosen_idx FROM sense_cache WHERE lemma=? AND ctx_hash=? AND key_level='L2'",
-                          (lemma, h2)).fetchone()
-    cached1 = None
-    if h1:
-        cached1 = conn.execute("SELECT chosen_idx FROM sense_cache WHERE lemma=? AND ctx_hash=? AND key_level='L1'",
-                               (lemma, h1)).fetchone()
-    should, why = prefilter(lemma, cands, cached=cached)
-    out["reason"] = why
-    if not should:
-        if cached:
-            out["chosen_idx"] = cached[0]
-            out["reason"] = "cache_hit_L2"
-        out["fallback"] = 1
-        _log(conn, out, "L2")
-        conn.commit()
-        return out
-    if _calls_today(conn) >= DAILY_CALL_CAP:
-        out["reason"] = "daily_cap"
-        out["fallback"] = 1
-        _log(conn, out, "L2")
-        conn.commit()
-        return out
-    if cached1 is not None:
-        out["reason"] = "L1_generalized_hit_shadow_only"
-    sys_p, user_p = _judge_prompt(lemma, sentence, cands)
+    with access(conn):
+        health.require_clean(conn)
+        ensure_tables(conn)
+        out = {"lemma": lemma, "ts": int(time.time()), "fallback": 0, "reason": None,
+               "chosen_idx": None, "baseline_idx": 0, "n_candidates": 0, "latency_ms": 0,
+               "ctx_hash": None, "prompt_version": PROMPT_VERSION}
+        out["n_candidates"] = len(cands)
+        fp = hashlib.sha1(("|".join(cands)).encode("utf-8")).hexdigest()[:12] if cands else ""
+        h2 = ctx_hash_sentence(lemma, sentence)
+        h1 = ctx_hash_collocation(lemma, sentence)
+        out["ctx_hash"] = h2
+        cached = conn.execute("SELECT chosen_idx FROM sense_cache WHERE lemma=? AND ctx_hash=? AND key_level='L2'",
+                              (lemma, h2)).fetchone()
+        cached1 = None
+        if h1:
+            cached1 = conn.execute("SELECT chosen_idx FROM sense_cache WHERE lemma=? AND ctx_hash=? AND key_level='L1'",
+                                   (lemma, h1)).fetchone()
+        should, why = prefilter(lemma, cands, cached=cached)
+        out["reason"] = why
+        if not should:
+            if cached:
+                out["chosen_idx"] = cached[0]
+                out["reason"] = "cache_hit_L2"
+            out["fallback"] = 1
+            _log(conn, out, "L2")
+            conn.commit()
+            return out
+        if _calls_today(conn) >= DAILY_CALL_CAP:
+            out["reason"] = "daily_cap"
+            out["fallback"] = 1
+            _log(conn, out, "L2")
+            conn.commit()
+            return out
+        if cached1 is not None:
+            out["reason"] = "L1_generalized_hit_shadow_only"
+        sys_p, user_p = _judge_prompt(lemma, sentence, cands)
     t0 = time.time()
     chosen = None
     try:
@@ -186,31 +193,34 @@ def judge(conn, dict_path, lemma, sentence, llm_chat=None):
                 chosen = idx
     except Exception as e:
         out["reason"] = "llm_error:" + type(e).__name__
-    out["latency_ms"] = int((time.time() - t0) * 1000)
-    if chosen is None:
-        out["fallback"] = 1
-        if not out["reason"] or out["reason"] == "worth_llm":
-            out["reason"] = "invalid_or_timeout"
-    else:
-        out["chosen_idx"] = chosen
-        conn.execute(
-            "INSERT INTO sense_cache(lemma, ctx_hash, key_level, chosen_idx, baseline_idx, candidates_fp, model,"
-            " prompt_version, latency_ms, fallback, created_at) VALUES(?,?,?,?,?,?,?,?,?,0,?)"
-            " ON CONFLICT(lemma, ctx_hash, key_level) DO UPDATE SET chosen_idx=excluded.chosen_idx,"
-            " latency_ms=excluded.latency_ms, created_at=excluded.created_at",
-            (lemma, h2, "L2", chosen, 0, fp, MODEL_HINT, PROMPT_VERSION, out["latency_ms"], out["ts"]))
-        if h1:
+    with access(conn):
+        health.require_clean(conn)
+        out["latency_ms"] = int((time.time() - t0) * 1000)
+        if chosen is None:
+            out["fallback"] = 1
+            if not out["reason"] or out["reason"] == "worth_llm":
+                out["reason"] = "invalid_or_timeout"
+        else:
+            out["chosen_idx"] = chosen
             conn.execute(
                 "INSERT INTO sense_cache(lemma, ctx_hash, key_level, chosen_idx, baseline_idx, candidates_fp, model,"
                 " prompt_version, latency_ms, fallback, created_at) VALUES(?,?,?,?,?,?,?,?,?,0,?)"
-                " ON CONFLICT(lemma, ctx_hash, key_level) DO NOTHING",
-                (lemma, h1, "L1", chosen, 0, fp, MODEL_HINT, PROMPT_VERSION, out["latency_ms"], out["ts"]))
-        out["reason"] = out["reason"] or "judged"
-    _log(conn, out, "L2")
-    conn.commit()
-    return out
+                " ON CONFLICT(lemma, ctx_hash, key_level) DO UPDATE SET chosen_idx=excluded.chosen_idx,"
+                " latency_ms=excluded.latency_ms, created_at=excluded.created_at",
+                (lemma, h2, "L2", chosen, 0, fp, MODEL_HINT, PROMPT_VERSION, out["latency_ms"], out["ts"]))
+            if h1:
+                conn.execute(
+                    "INSERT INTO sense_cache(lemma, ctx_hash, key_level, chosen_idx, baseline_idx, candidates_fp, model,"
+                    " prompt_version, latency_ms, fallback, created_at) VALUES(?,?,?,?,?,?,?,?,?,0,?)"
+                    " ON CONFLICT(lemma, ctx_hash, key_level) DO NOTHING",
+                    (lemma, h1, "L1", chosen, 0, fp, MODEL_HINT, PROMPT_VERSION, out["latency_ms"], out["ts"]))
+            out["reason"] = out["reason"] or "judged"
+        _log(conn, out, "L2")
+        conn.commit()
+        return out
 
 
+@guarded
 def stats(conn):
     ensure_tables(conn)
     day0 = int(time.time()) // 86400 * 86400

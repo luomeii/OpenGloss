@@ -8,6 +8,8 @@ dogfooding 纪律（审查方要求 + 36 号文档记录）：
 本模块只做三件事：① 组装决策提示（人格 + 状态 + 可用能力）② 解析模型给的 JSON 计划
 ③ 把 actions 交给 capsurface 执行，并把「想了什么/做了什么」写进 agent_log（透明）。
 """
+from . import health
+from .db_access import access, guarded
 import json
 import re
 import time
@@ -89,9 +91,11 @@ def observe():
     return (body or {}).get("result") or {}
 
 
+@guarded
 def tunable_doc(conn):
     """可调变量表：当前值 + 区间 + 默认值（模型必须看到这个才提得出合法提案）。"""
     from . import params as params_mod
+    health.require_clean(conn)
     eff = params_mod.effective(conn)
     return {k: {"current": eff.get(k), "range": list(params_mod.RANGE_ALL.get(k) or []),
                 "default": params_mod.DEFAULTS_ALL.get(k)}
@@ -141,24 +145,26 @@ def tick(conn, actor="companion", stimulus=""):
     # 限流：tick 会真实花 LLM 额度，不能无限跑
     now_i = int(time.time())
     day_start = now_i // 86400 * 86400
-    row = conn.execute("SELECT MAX(ts) FROM agent_log").fetchone()
-    last_ts = (row or [None])[0]
-    if last_ts and now_i - last_ts < TICK_MIN_INTERVAL_S:
-        # 被限流也留痕（用户能看见「它想跑但被节流了」），但不吃每日额度
-        conn.execute("INSERT INTO agent_log(ts, actor, stimulus, thought, actions, result, elapsed_ms)"
-                     " VALUES(?,?,?,?,?,?,?)",
-                     (now_i, actor, (stimulus or "")[:500], "(rate_limited)",
-                      "[]", json.dumps({"error": "rate_limited"}), 0))
-        conn.commit()
-        return {"actor": actor, "thought": "", "actions": [], "error": "rate_limited",
-                "detail": "两次 tick 至少间隔 %ds（防烧额度）" % TICK_MIN_INTERVAL_S,
-                "wait_s": TICK_MIN_INTERVAL_S - (now_i - last_ts), "elapsed_ms": 0}
-    today_ticks = conn.execute(
-        "SELECT COUNT(*) FROM agent_log WHERE ts >= ? AND result NOT LIKE '%rate_limited%'",
-        (day_start,)).fetchone()[0]
-    if today_ticks >= TICK_DAILY_LIMIT:
-        return {"actor": actor, "thought": "", "actions": [], "error": "daily_limit",
-                "detail": "今日 tick 已达上限 %d" % TICK_DAILY_LIMIT, "elapsed_ms": 0}
+    with access(conn):
+        health.require_clean(conn)
+        with conn:
+            row = conn.execute("SELECT MAX(ts) FROM agent_log").fetchone()
+            last_ts = (row or [None])[0]
+            if last_ts and now_i - last_ts < TICK_MIN_INTERVAL_S:
+                # 被限流也留痕（用户能看见「它想跑但被节流了」），但不吃每日额度
+                conn.execute("INSERT INTO agent_log(ts, actor, stimulus, thought, actions, result, elapsed_ms)"
+                             " VALUES(?,?,?,?,?,?,?)",
+                             (now_i, actor, (stimulus or "")[:500], "(rate_limited)",
+                              "[]", json.dumps({"error": "rate_limited"}), 0))
+                return {"actor": actor, "thought": "", "actions": [], "error": "rate_limited",
+                        "detail": "两次 tick 至少间隔 %ds（防烧额度）" % TICK_MIN_INTERVAL_S,
+                        "wait_s": TICK_MIN_INTERVAL_S - (now_i - last_ts), "elapsed_ms": 0}
+            today_ticks = conn.execute(
+                "SELECT COUNT(*) FROM agent_log WHERE ts >= ? AND result NOT LIKE '%rate_limited%'",
+                (day_start,)).fetchone()[0]
+            if today_ticks >= TICK_DAILY_LIMIT:
+                return {"actor": actor, "thought": "", "actions": [], "error": "daily_limit",
+                        "detail": "今日 tick 已达上限 %d" % TICK_DAILY_LIMIT, "elapsed_ms": 0}
     ctx = observe()
     raw, meta = ("", {})
     actions = []
@@ -167,6 +173,8 @@ def tick(conn, actor="companion", stimulus=""):
     err = None
     try:
         raw, meta = decide(ctx, stimulus, conn=conn)
+        with access(conn):
+            health.require_clean(conn)
         plan = _parse(raw)
         if plan is None:
             err = "bad_json"
@@ -179,6 +187,7 @@ def tick(conn, actor="companion", stimulus=""):
                 results.append({"name": a["name"], "status": st, "body": body})
                 # 失败给一次自修机会（把错误原样回喂，让模型改参数，最多一次）
                 if st >= 400:
+                    health.check(conn)
                     fixed = _repair(a, st, body, ctx, conn)
                     if fixed:
                         st2, body2 = capsurface.handle(fixed["name"], fixed.get("params") or {},
@@ -188,17 +197,20 @@ def tick(conn, actor="companion", stimulus=""):
     except Exception as e:
         err = "%s: %s" % (type(e).__name__, str(e)[:200])
     elapsed = int((time.time() - t0) * 1000)
-    conn.execute(
-        "INSERT INTO agent_log(ts, actor, stimulus, thought, actions, result, elapsed_ms, raw_reply)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        (int(time.time()), actor, (stimulus or "")[:500], thought,
-         json.dumps(actions, ensure_ascii=False), json.dumps({"results": results, "error": err}, ensure_ascii=False),
-         elapsed, (raw or "")[:2000]))
-    conn.commit()
+    with access(conn):
+        health.require_clean(conn)
+        with conn:
+            conn.execute(
+                "INSERT INTO agent_log(ts, actor, stimulus, thought, actions, result, elapsed_ms, raw_reply)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (int(time.time()), actor, (stimulus or "")[:500], thought,
+                 json.dumps(actions, ensure_ascii=False), json.dumps({"results": results, "error": err}, ensure_ascii=False),
+                 elapsed, (raw or "")[:2000]))
     return {"actor": actor, "thought": thought, "actions": results, "error": err,
             "elapsed_ms": elapsed, "usage": (meta or {}).get("usage")}
 
 
+@guarded
 def log(conn, n=20):
     out = []
     for r in conn.execute("SELECT ts, actor, stimulus, thought, result, elapsed_ms FROM agent_log"

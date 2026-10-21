@@ -14,9 +14,13 @@ PAE_ROOT = Path(os.environ.get("PAE_ROOT") or Path(__file__).resolve().parents[1
 PROJECT_ROOT = PAE_ROOT.parent
 
 
+def config_path():
+    return Path(os.environ.get("PAE_CONFIG_PATH") or (Path(__file__).resolve().parents[1] / "config.json"))
+
+
 def _config():
     try:
-        return json.loads((PAE_ROOT / "config.json").read_text(encoding="utf-8"))
+        return json.loads(Path(os.environ.get("PAE_CONFIG_PATH") or (PAE_ROOT / "config.json")).read_text(encoding="utf-8"))
     except Exception:
         return {}
 

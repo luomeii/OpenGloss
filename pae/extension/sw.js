@@ -6,6 +6,15 @@
 // ---------------------------------------------------------------------------
 var PAE_BASE = 'http://127.0.0.1:4815';
 
+async function paeReadJson(response) {
+  if (!response.ok) throw new Error('HTTP ' + response.status);
+  var data = await response.json();
+  if (data && (data.ok === false || (data.result && data.result.ok === false))) {
+    throw new Error(String(data.error || (data.result && data.result.error) || 'request failed'));
+  }
+  return data;
+}
+
 function paeNormBase(v) {
   var s = String(v || '');
   while (s.length && s.charAt(s.length - 1) === '/') { s = s.slice(0, -1); }
@@ -241,7 +250,7 @@ async function paePersonaName() {
   try {
     var r = await fetch(PAE_BASE + '/v1/cap/pae.persona', { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    var j = await r.json();
+    var j = await paeReadJson(r);
     PAE_PERSONA_NAME = (((j.result || {}).params || {}).name) || '小P';
   } catch (e) {
     PAE_PERSONA_NAME = '小P';
@@ -261,7 +270,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           body: JSON.stringify({ muted: !!msg.muted })
         });
         var j = null;
-        try { j = await res.json(); } catch (e2) {}
+        try { j = await paeReadJson(res); } catch (e2) {}
         sendResponse({ ok: res.ok && !!(j && j.ok), muted: (j && j.result && j.result.muted) });
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });
@@ -272,23 +281,26 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   if (msg && msg.type === 'PAE_CHAR_STATS') {
     (async function () {
       try {
-        var o = {}, f = {}, ctx = {};
+        var o = {}, f = {}, ctx = {}, received = 0;
         try {
           var r1 = await fetch(PAE_BASE + '/v1/cap/pae.outcomes', { method: 'POST',
             headers: { 'Content-Type': 'application/json' }, body: '{"evaluate_decisions":false}' });
-          o = ((await r1.json()).result) || {};
+          o = ((await paeReadJson(r1)).result) || {};
+          received++;
         } catch (e) {}
         try {
           var r2 = await fetch(PAE_BASE + '/v1/cap/pae.familiarity', { method: 'POST',
             headers: { 'Content-Type': 'application/json' }, body: '{"recompute":false}' });
-          f = ((await r2.json()).result) || {};
+          f = ((await paeReadJson(r2)).result) || {};
+          received++;
         } catch (e) {}
         // 侧栏「最近在啃」+ 圆环指标：pae.context 一次拿 words（带 S 值）与 metrics（速率）
         try {
           var r3 = await fetch(PAE_BASE + '/v1/cap/pae.context', { method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: '{"include":["words","metrics"],"top_n":8}' });
-          ctx = ((await r3.json()).result) || {};
+          ctx = ((await paeReadJson(r3)).result) || {};
+          received++;
         } catch (e) {}
         // 印章卡数据：长期记忆 facts（真事实才显示）。
         // 2026-10-03 二次反馈修复：以前 facts 为空时拿「最近 4 条对话」冒充记忆——
@@ -298,8 +310,10 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         try {
           var r4 = await fetch(PAE_BASE + '/v1/cap/pae.memory.search', { method: 'POST',
             headers: { 'Content-Type': 'application/json' }, body: '{"query":"","k":8}' });
-          facts = ((await r4.json()).result) || [];
+          facts = ((await paeReadJson(r4)).result) || [];
+          received++;
         } catch (e) {}
+        if (!received) throw new Error("引擎暂时不可用，统计未更新");
         var mm = ctx.metrics || {};
         var cohortN = Number(o.cohort_size || 0) || 0;
         var convN = Number(o.converted || 0) || 0;
@@ -381,7 +395,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       try {
         var r = await fetch(PAE_BASE + '/v1/cap/pae.params', { method: 'POST',
           headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        var j = await r.json();
+        var j = await paeReadJson(r);
         var eff = (j.result || {}).effective || {};
         sendResponse({ ok: true, limits: { max_ann_per_page: eff.max_ann_per_page,
                                            annotate_max_s: eff.annotate_max_s,
@@ -407,7 +421,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ stimulus: msg.text || '（用户点了你一下）' })
         });
-        var j2 = await r2.json();
+        var j2 = await paeReadJson(r2);
         sendResponse({ ok: true, reply: ((j2.result || {}).reply) || '', error: j2.error });
       } catch (e) {
         sendResponse({ ok: false, error: String((e && e.message) || e) });
@@ -421,7 +435,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
       try {
         var r = await fetch(PAE_BASE + '/v1/cap/pae.memory.recent', { method: 'POST',
           headers: { 'Content-Type': 'application/json' }, body: '{"n":60}' });
-        var j = await r.json();
+        var j = await paeReadJson(r);
         sendResponse({ ok: true, turns: (j.result || []) });
       } catch (e) {
         sendResponse({ ok: false, turns: [] });
@@ -451,7 +465,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
               s_value: (i === 0 && typeof d.s_value === 'number') ? d.s_value : undefined
             })
           });
-          last = await res.json();
+          last = await paeReadJson(res);
         }
         sendResponse({ ok: true, data: last });
       } catch (e) {
@@ -489,7 +503,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
         body: JSON.stringify({ text: msg.text, page_id: msg.pageId, session_id: msg.sessionId || null })
       });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      var data = await r.json();
+      var data = await paeReadJson(r);
       var rendered = { rendered: 0 };
       var tabId = sender && sender.tab && sender.tab.id;
       // ① 关键路径：只做「把注解画出来」，其余一律不阻塞响应

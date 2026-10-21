@@ -3,6 +3,8 @@
 
 内置 companion 与外部智能体走同一入口，谁都没有内部捷径（防两条路径漂移）。
 """
+from . import health
+from .db_access import access, guarded, transaction
 import json
 import time
 from pathlib import Path
@@ -11,7 +13,8 @@ from . import keys as keys_mod
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "capabilities.json"
-CONFIG_PATH = ROOT / "config.json"
+from .paths import config_path
+CONFIG_PATH = config_path()
 
 
 def load_manifest() -> dict:
@@ -93,6 +96,7 @@ def audit(actor: str, capability: str, ok: bool, detail: str = "") -> None:
         LAST_AUDIT_ERROR = "%s: %s" % (type(e).__name__, e)
 
 
+@guarded
 def _remember_turns(conn, user_text: str, agent_text: str):
     """把一次「说出来」的对话写成会话轮次（chat_turns）。
 
@@ -103,18 +107,24 @@ def _remember_turns(conn, user_text: str, agent_text: str):
     相邻重复写入会被跳过（同一句重复调 say 不会灌水）。
     """
     from . import memory as mem_mod
-    row = conn.execute("SELECT session_id FROM chat_sessions WHERE actor='companion'"
-                       " AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
-    sid = row[0] if row else mem_mod.session_open(conn, "companion")["session_id"]
-    for role, text in (("user", user_text), ("agent", agent_text)):
-        text = str(text or "").strip()
-        if not text:
-            continue
-        last = conn.execute("SELECT role, text FROM chat_turns WHERE session_id=?"
-                            " ORDER BY ts DESC, rowid DESC LIMIT 1", (sid,)).fetchone()
-        if last and last[0] == role and last[1] == text:
-            continue
-        mem_mod.session_turn(conn, sid, role, text)
+    turns = [(role, str(text or "").strip()) for role, text in
+             (("user", user_text), ("agent", agent_text))]
+    if any(len(text) > mem_mod.MAX_TURN_TEXT for _, text in turns):
+        raise ValueError(json.dumps({"error": "chat_text_too_long", "max": mem_mod.MAX_TURN_TEXT}))
+    with transaction(conn):
+        row = conn.execute("SELECT session_id FROM chat_sessions WHERE actor='companion'"
+                           " AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
+        sid = row[0] if row else mem_mod.session_open(conn, "companion", autocommit=False)["session_id"]
+        for role, text in turns:
+            if not text:
+                continue
+            last = conn.execute("SELECT role, text FROM chat_turns WHERE session_id=?"
+                                " ORDER BY ts DESC, rowid DESC LIMIT 1", (sid,)).fetchone()
+            if last and last[0] == role and last[1] == text:
+                continue
+            ok, body = mem_mod.session_turn(conn, sid, role, text, autocommit=False)
+            if not ok:
+                raise ValueError(json.dumps(body, ensure_ascii=False))
     return sid
 
 
@@ -180,7 +190,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
     from . import persona as persona_mod
 
     if name == "pae.health":
-        return {"ok": True}
+        return get_engine().check_health()
     if name == "pae.annotate":
         return get_engine().annotate(params.get("text", ""), params.get("page_id") or "default",
                                      params.get("session_id"))
@@ -248,41 +258,43 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             return body
         return mem_mod.session_close(conn, params.get("session_id"), params.get("summary"))
     if name == "pae.propose":
-        from . import params as params_mod
-        from . import push as push_mod
-        eng = get_engine()
-        ok, body = params_mod.propose(eng.conn, params.get("actor") or actor,
-                                      params.get("patch"), params.get("rationale", ""),
-                                      params.get("evidence"), params.get("ttl_days"))
-        if not ok:
-            raise ValueError(json.dumps(body, ensure_ascii=False))
-        eng.refresh_params()
-        push_mod.notify(eng.conn, "param_changed",
-                        {"decision_id": body.get("decision_id"), "after": body.get("applied_keys")},
-                        actor=params.get("actor") or "companion")
-        return body
+        with access(get_engine().conn):
+            from . import params as params_mod
+            from . import push as push_mod
+            eng = get_engine()
+            ok, body = params_mod.propose(eng.conn, params.get("actor") or actor,
+                                          params.get("patch"), params.get("rationale", ""),
+                                          params.get("evidence"), params.get("ttl_days"))
+            if not ok:
+                raise ValueError(json.dumps(body, ensure_ascii=False))
+            eng.refresh_params()
+            push_mod.notify(eng.conn, "param_changed",
+                            {"decision_id": body.get("decision_id"), "after": body.get("applied_keys")},
+                            actor=params.get("actor") or "companion")
+            return body
     if name == "pae.decisions":
         from . import params as params_mod
         return params_mod.list_decisions(get_engine().conn, params.get("actor"),
                                          int(params.get("n") or 20))
     if name == "pae.pin":
-        import time as _t
-        eng = get_engine()
-        actor_pin = params.get("actor") or actor
-        # 配额：防批量「标记认识了」把注解静默关掉（AI 每天 ≤20）
-        day_start = int(_t.time()) // 86400 * 86400
-        used = eng.conn.execute(
-            "SELECT COUNT(*) FROM events WHERE type='user_pin' AND source=? AND ts>=?",
-            (actor_pin, day_start)).fetchone()[0]
-        limit = 20
-        if actor_pin not in ("user", "local") and used >= limit:
-            raise ValueError(json.dumps(
-                {"error": "pin_quota_exceeded", "actor": actor_pin, "used_today": used, "limit": limit,
-                 "hint": "批量标记会静默关掉注解；如需更多请用户操作"}, ensure_ascii=False))
-        return eng.record_event("user_pin", params.get("lemma") or "",
-                               metas={"page_id": params.get("page_id") or "",
-                                      "session_id": params.get("session_id") or ""},
-                               source=actor_pin)
+        with access(get_engine().conn):
+            import time as _t
+            eng = get_engine()
+            actor_pin = params.get("actor") or actor
+            # 配额：防批量「标记认识了」把注解静默关掉（AI 每天 ≤20）
+            day_start = int(_t.time()) // 86400 * 86400
+            used = eng.conn.execute(
+                "SELECT COUNT(*) FROM events WHERE type='user_pin' AND source=? AND ts>=?",
+                (actor_pin, day_start)).fetchone()[0]
+            limit = 20
+            if actor_pin not in ("user", "local") and used >= limit:
+                raise ValueError(json.dumps(
+                    {"error": "pin_quota_exceeded", "actor": actor_pin, "used_today": used, "limit": limit,
+                     "hint": "批量标记会静默关掉注解；如需更多请用户操作"}, ensure_ascii=False))
+            return eng.record_event("user_pin", params.get("lemma") or "",
+                                   metas={"page_id": params.get("page_id") or "",
+                                          "session_id": params.get("session_id") or ""},
+                                   source=actor_pin)
     if name == "pae.say":
         from . import push as push_mod
         ok, body = push_mod.say(get_engine().conn, params.get("actor") or actor,
@@ -319,7 +331,11 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         _p = sched_mod.CONFIG   # 与调度读取同一个文件（可用 PAE_SCHEDULE_CONFIG 隔离）
         all_cfg = _json.loads(_p.read_text(encoding="utf-8"))
         all_cfg["agent_schedule"] = cfg
-        _p.write_text(_json.dumps(all_cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        encoded = _json.dumps(all_cfg, ensure_ascii=False, indent=2) + "\n"
+        if want is False:
+            _p.write_text(encoded, encoding="utf-8")  # Explicit stop remains available.
+        else:
+            get_engine().conn.health.publish(_p.write_text, encoded, encoding="utf-8")
         if cfg.get("enabled"):
             sched_mod.start(get_engine().db_path)
         else:
@@ -337,7 +353,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             raise ValueError(json.dumps({"error": "forbidden",
                                          "detail": "只有用户能签发外部 key"}, ensure_ascii=False))
         who = params.get("name") or "ext:unnamed"
-        plain = keys_mod.issue(who)
+        plain = get_engine().conn.health.publish(keys_mod.issue, who)
         return {"actor": who, "key": plain,
                 "note": "明文只显示这一次；外部智能体用它作 X-PAE-Key"}
     if name == "pae.permissions":
@@ -380,26 +396,28 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             },
         }
     if name == "pae.params":
-        from . import params as params_mod
-        conn = get_engine().conn
-        eff = params_mod.effective(conn)
-        return {
-            "overrides": params_mod.current_overrides(conn),
-            "effective": {k: eff.get(k) for k in params_mod.TUNABLE},
-            "defaults": {k: params_mod.DEFAULTS_ALL.get(k) for k in params_mod.TUNABLE},
-            "ranges": {k: list(v) for k, v in params_mod.RANGE_ALL.items()},
-        }
+        with access(get_engine().conn):
+            from . import params as params_mod
+            conn = get_engine().conn
+            eff = params_mod.effective(conn)
+            return {
+                "overrides": params_mod.current_overrides(conn),
+                "effective": {k: eff.get(k) for k in params_mod.TUNABLE},
+                "defaults": {k: params_mod.DEFAULTS_ALL.get(k) for k in params_mod.TUNABLE},
+                "ranges": {k: list(v) for k, v in params_mod.RANGE_ALL.items()},
+            }
     if name == "pae.push.log":
         from . import push as push_mod
         return push_mod.log(get_engine().conn, n=int(params.get("n") or 20), kind=params.get("kind"))
     if name == "pae.mute":
         # 静音闭环（2026-10-03 用户反馈修复）：扩展「静音」按钮此前只活在主世界内存里，
         # 引擎侧的主动说话（maybe_proactive）不知道，静音后仍会推送。现在读写打通。
-        from . import push as push_mod
-        eng = get_engine()
-        if params.get("muted") is not None:
-            push_mod.set_muted(eng.conn, bool(params.get("muted")))
-        return {"muted": push_mod.is_muted(eng.conn)}
+        with access(get_engine().conn):
+            from . import push as push_mod
+            eng = get_engine()
+            if params.get("muted") is not None:
+                push_mod.set_muted(eng.conn, bool(params.get("muted")))
+            return {"muted": push_mod.is_muted(eng.conn)}
     if name == "pae.sensejudge":
         from . import engine as eng_mod
         from . import sensejudge as sj_mod
@@ -409,21 +427,23 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         return sj_mod.judge(eng.conn, eng_mod.DICT_SQLITE_PATH, params.get("lemma"),
                             params.get("sentence"))
     if name == "pae.familiarity":
-        from . import familiarity as fam_mod
-        eng = get_engine()
-        if params.get("recompute", True):
-            fam_mod.recompute(eng.conn, eng.params, eng.states)
-        mode = _fam_mode()
-        rep = fam_mod.shadow_report(eng.conn, int(params.get("limit") or 20))
-        rep["mode"] = mode
-        rep["enforce_active"] = (mode == "enforce")
-        return rep
+        with access(get_engine().conn):
+            from . import familiarity as fam_mod
+            eng = get_engine()
+            if params.get("recompute", True):
+                fam_mod.recompute(eng.conn, eng.params, eng.states)
+            mode = _fam_mode()
+            rep = fam_mod.shadow_report(eng.conn, int(params.get("limit") or 20))
+            rep["mode"] = mode
+            rep["enforce_active"] = (mode == "enforce")
+            return rep
     if name == "pae.familiarity.restore":
-        from . import familiarity as fam_mod
-        eng = get_engine()
-        out = fam_mod.restore(eng.conn, params.get("lemma") or "", params.get("actor") or actor)
-        fam_mod.recompute(eng.conn, eng.params, eng.states)
-        return out
+        with access(get_engine().conn):
+            from . import familiarity as fam_mod
+            eng = get_engine()
+            out = fam_mod.restore(eng.conn, params.get("lemma") or "", params.get("actor") or actor)
+            fam_mod.recompute(eng.conn, eng.params, eng.states)
+            return out
     if name == "pae.outcomes":
         from . import metrics as metrics_mod
         eng = get_engine()
@@ -445,27 +465,31 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         return {"prompt": persona_mod.render(p), "bands": persona_mod.bands(p),
                 "issues": persona_mod.validate(p)}
     if name == "pae.persona.update":
-        from . import params as params_mod
-        newp = params.get("params") or {}
-        ok, issues, axes = params_mod.persona_guard(get_engine().conn, params.get("actor") or actor, newp)
-        if not ok:
-            raise ValueError(json.dumps({"error": "persona_guard", "issues": issues}, ensure_ascii=False))
-        ok2, issues2, path = persona_mod.save_params(newp)
-        if not ok2:
-            raise ValueError(json.dumps({"error": "invalid", "issues": issues2}, ensure_ascii=False))
-        # 记进 decisions（可审计、可回滚，也是「同轴 7 天冷却」的依据）
-        conn = get_engine().conn
-        conn.execute(
-            "INSERT INTO decisions(decision_id, ts, actor, capability, patch, rationale, evidence,"
-            " before, after, applied, gate_result) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
-            ("dec_" + __import__("uuid").uuid4().hex[:16], int(time.time()),
-             params.get("actor") or actor, "pae.persona.update",
-             json.dumps([{"axis": k, "to": v["to"]} for k, v in axes.items()], ensure_ascii=False),
-             params.get("rationale") or "", "[]", json.dumps(axes, ensure_ascii=False),
-             json.dumps(axes, ensure_ascii=False), "persona_guard: ok"))
-        conn.commit()
-        return {"ok": True, "saved_to": path, "axes_changed": axes}
+        with access(get_engine().conn):
+            from . import params as params_mod
+            newp = params.get("params") or {}
+            ok, issues, axes = params_mod.persona_guard(get_engine().conn, params.get("actor") or actor, newp)
+            if not ok:
+                raise ValueError(json.dumps({"error": "persona_guard", "issues": issues}, ensure_ascii=False))
+            ok2, issues2, path = get_engine().conn.health.publish(persona_mod.save_params, newp)
+            if not ok2:
+                raise ValueError(json.dumps({"error": "invalid", "issues": issues2}, ensure_ascii=False))
+            # 记进 decisions（可审计、可回滚，也是「同轴 7 天冷却」的依据）
+            conn = get_engine().conn
+            conn.execute(
+                "INSERT INTO decisions(decision_id, ts, actor, capability, patch, rationale, evidence,"
+                " before, after, applied, gate_result) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
+                ("dec_" + __import__("uuid").uuid4().hex[:16], int(time.time()),
+                 params.get("actor") or actor, "pae.persona.update",
+                 json.dumps([{"axis": k, "to": v["to"]} for k, v in axes.items()], ensure_ascii=False),
+                 params.get("rationale") or "", "[]", json.dumps(axes, ensure_ascii=False),
+                 json.dumps(axes, ensure_ascii=False), "persona_guard: ok"))
+            conn.commit()
+            return {"ok": True, "saved_to": path, "axes_changed": axes}
     if name == "pae.persona.say":
+        from .memory import MAX_TURN_TEXT
+        if len(str(params.get("stimulus") or "").strip()) > MAX_TURN_TEXT:
+            raise ValueError(json.dumps({"error": "chat_text_too_long", "max": MAX_TURN_TEXT}))
         # H2 配额（评审 2026-10-03）：persona.say 是真实 LLM 调用且此前**无任何日限**
         # （有日限的是推送型 pae.say）。每轮聊天一次调用，正常重度使用一天难超 120；
         # 恶意/失控循环（页面伪造桥消息、脚本死循环）会被这里掐断。本地 local 通道
@@ -554,64 +578,65 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         t0 = time.time()
         r = llm_mod.chat(msgs, temperature=temp, timeout=90)
         reply = (r.get("content") or "").strip()
+        if len(reply) > MAX_TURN_TEXT:
+            raise ValueError(json.dumps({"error": "chat_reply_too_long", "max": MAX_TURN_TEXT}))
         # [[记住]] 协议落库：截走标记行 → 真写 facts（带当日限流，防模型自嗨刷库）
-        remembered = None
-        mark_lines = [ln for ln in reply.splitlines() if ("[[记住]]" in ln) or ("【记住】" in ln)]
-        if mark_lines:
-            import re as _re
-            fact_txt = ""
-            for ln in mark_lines:
-                cand = _re.sub(r"\[\[记住\]\]|【记住】", "", ln).strip().strip("「」‘’“”\"' ")
-                if cand:
-                    fact_txt = cand
-                    break
-            if fact_txt:
-                day0 = int(time.time()) // 86400 * 86400
-                used_today = int(get_engine().conn.execute(
-                    "SELECT COUNT(*) FROM facts WHERE source_actor='companion' AND created_at >= ?",
-                    (day0,)).fetchone()[0])
-                if used_today >= 8:
-                    remembered = {"ok": False, "skipped": "daily_fact_limit", "used_today": used_today}
-                else:
-                    from . import memory as _mem
-                    okf, fbody = _mem.remember(get_engine().conn, "companion", "event",
-                                               fact_txt[:200], [{"stimulus": stimulus[:300]}],
-                                               confidence=0.8)
-                    remembered = {"ok": bool(okf), "via": "marker"}
-                    if isinstance(fbody, dict):
-                        remembered.update(fbody)
-            reply = "\n".join(ln for ln in reply.splitlines()
-                              if ("[[记住]]" not in ln) and ("【记住】" not in ln)).strip()
-        # 意图兜底（2026-10-03 三次反馈）：模型没写标记行，但用户话里明确让记 →
-        # 直接把用户原话存为事实。确定性 regex，不依赖模型配合率。
-        if not mark_lines:
-            intent_txt = _extract_remember_intent(stimulus)
-            if intent_txt:
-                day0 = int(time.time()) // 86400 * 86400
-                used_today = int(get_engine().conn.execute(
-                    "SELECT COUNT(*) FROM facts WHERE source_actor='user' AND created_at >= ?",
-                    (day0,)).fetchone()[0])
-                if used_today >= 30:
-                    remembered = {"ok": False, "skipped": "daily_intent_limit", "used_today": used_today}
-                else:
-                    from . import memory as _mem
-                    okf, fbody = _mem.remember(get_engine().conn, "user", "preference",
-                                               intent_txt[:200],
-                                               [{"via": "chat_intent", "stimulus": stimulus[:300]}],
-                                               confidence=0.9)
-                    remembered = {"ok": bool(okf), "via": "intent"}
-                    if isinstance(fbody, dict):
-                        remembered.update(fbody)
-        if not reply:
-            reply = "记下了。"
-        # 说出的话必须落库，否则「下一轮记得上一轮」没有数据源（见 _remember_turns 的说明）
-        try:
+        with transaction(get_engine().conn):
+            get_engine().check_health()
+            remembered = None
+            mark_lines = [ln for ln in reply.splitlines() if ("[[记住]]" in ln) or ("【记住】" in ln)]
+            if mark_lines:
+                import re as _re
+                fact_txt = ""
+                for ln in mark_lines:
+                    cand = _re.sub(r"\[\[记住\]\]|【记住】", "", ln).strip().strip("「」‘’“”\"' ")
+                    if cand:
+                        fact_txt = cand
+                        break
+                if fact_txt:
+                    day0 = int(time.time()) // 86400 * 86400
+                    used_today = int(get_engine().conn.execute(
+                        "SELECT COUNT(*) FROM facts WHERE source_actor='companion' AND created_at >= ?",
+                        (day0,)).fetchone()[0])
+                    if used_today >= 8:
+                        remembered = {"ok": False, "skipped": "daily_fact_limit", "used_today": used_today}
+                    else:
+                        from . import memory as _mem
+                        okf, fbody = _mem.remember(get_engine().conn, "companion", "event",
+                                                   fact_txt[:200], [{"stimulus": stimulus[:300]}],
+                                                   confidence=0.8)
+                        remembered = {"ok": bool(okf), "via": "marker"}
+                        if isinstance(fbody, dict):
+                            remembered.update(fbody)
+                reply = "\n".join(ln for ln in reply.splitlines()
+                                  if ("[[记住]]" not in ln) and ("【记住】" not in ln)).strip()
+            # 意图兜底（2026-10-03 三次反馈）：模型没写标记行，但用户话里明确让记 →
+            # 直接把用户原话存为事实。确定性 regex，不依赖模型配合率。
+            if not mark_lines:
+                intent_txt = _extract_remember_intent(stimulus)
+                if intent_txt:
+                    day0 = int(time.time()) // 86400 * 86400
+                    used_today = int(get_engine().conn.execute(
+                        "SELECT COUNT(*) FROM facts WHERE source_actor='user' AND created_at >= ?",
+                        (day0,)).fetchone()[0])
+                    if used_today >= 30:
+                        remembered = {"ok": False, "skipped": "daily_intent_limit", "used_today": used_today}
+                    else:
+                        from . import memory as _mem
+                        okf, fbody = _mem.remember(get_engine().conn, "user", "preference",
+                                                   intent_txt[:200],
+                                                   [{"via": "chat_intent", "stimulus": stimulus[:300]}],
+                                                   confidence=0.9)
+                        remembered = {"ok": bool(okf), "via": "intent"}
+                        if isinstance(fbody, dict):
+                            remembered.update(fbody)
+            if not reply:
+                reply = "记下了。"
+            # 说出的话必须落库，否则「下一轮记得上一轮」没有数据源（见 _remember_turns 的说明）
             _remember_turns(get_engine().conn, stimulus, reply)
-        except Exception:
-            pass
-        return {"reply": reply, "elapsed_ms": int((time.time() - t0) * 1000),
-                "model": r.get("model"), "usage": r.get("usage"),
-                "history_turns": len(history), "remembered": remembered}
+            return {"reply": reply, "elapsed_ms": int((time.time() - t0) * 1000),
+                    "model": r.get("model"), "usage": r.get("usage"),
+                    "history_turns": len(history), "remembered": remembered}
     return None
 
 
@@ -647,8 +672,17 @@ def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
     if need not in (scopes or []):
         audit(actor, name, False, "scope_denied")
         return 403, {"ok": False, "error": "scope_denied", "need": need, "have": scopes}
+    from .engine import get_engine
+    stopping = name == "pae.agent.schedule.set" and (params or {}).get("enabled") is False
     try:
+        if not stopping:
+            get_engine().check_health()
         result = _dispatch(name, params or {}, actor)
+        if not stopping:
+            get_engine().check_health()
+    except health.EngineUnavailable as e:
+        audit(actor, name, False, str(e))
+        return 503, {"ok": False, "error": "engine_unavailable", "detail": str(e)}
     except Exception as e:
         audit(actor, name, False, "%s: %s" % (type(e).__name__, e))
         return 500, {"ok": False, "error": "%s: %s" % (type(e).__name__, str(e)[:200])}

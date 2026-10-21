@@ -1,7 +1,9 @@
 """PAE SQLite storage layer: events (append-only) + dict_words (lemma lexicon)."""
+from .db_access import access, guarded, ManagedConnection
 import json
 import sqlite3
 import uuid
+from . import health
 from typing import Optional
 
 DDL = """
@@ -129,7 +131,8 @@ CREATE INDEX IF NOT EXISTS idx_agent_log_ts ON agent_log(ts);
 
 def get_db(path) -> sqlite3.Connection:
     """Open (or create) the PAE database. WAL + foreign keys + Row factory."""
-    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30.0)
+    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=30.0, factory=ManagedConnection)
+    conn.health = health.for_path(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -137,23 +140,25 @@ def get_db(path) -> sqlite3.Connection:
     return conn
 
 
+@guarded
 def init_schema(conn) -> None:
     conn.executescript(DDL)
     conn.commit()
 
 
+@guarded
 def log_call(conn, actor: str, capability: str, ok: bool, detail: str = "") -> None:
-    """记一条能力调用审计（失败不抛，审计不能拖垮主流程）。"""
-    try:
+    """Write audit; capsurface.audit records failures without failing the request."""
+    health.require_clean(conn)
+    with conn:
         conn.execute(
             "INSERT INTO cap_calls(ts, actor, capability, ok, detail) VALUES(?,?,?,?,?)",
             (_now(), actor, capability, 1 if ok else 0, detail),
         )
-        conn.commit()
-    except Exception:
-        pass
 
 
+
+@guarded
 def append_event(conn, type, payload, idem_key=None, source="api", autocommit=True) -> Optional[str]:
     """Append one event. Idempotent when idem_key is given.
 
@@ -182,6 +187,7 @@ def append_event(conn, type, payload, idem_key=None, source="api", autocommit=Tr
     return event_id
 
 
+@guarded
 def load_events(conn, since_ts=0) -> list:
     """All events with ts >= since_ts, in (ts, rowid) order."""
     rows = conn.execute(
@@ -204,6 +210,7 @@ def load_events(conn, since_ts=0) -> list:
     return out
 
 
+@guarded
 def lookup_word(conn, word) -> Optional[tuple]:
     """Return (word, translation, exchange, bnc, frq, tag) or None."""
     row = conn.execute(
@@ -216,6 +223,7 @@ def lookup_word(conn, word) -> Optional[tuple]:
             row["bnc"], row["frq"], row["tag"])
 
 
+@guarded
 def import_lemma_as_dict(conn, lemma_map_path) -> int:
     """Seed dict_words with every lemma in the lemma map (INSERT OR IGNORE).
 

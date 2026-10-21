@@ -5,6 +5,8 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, Header, Response
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
+from . import health as runtime_health
 from pydantic import BaseModel
 
 from . import capsurface
@@ -14,8 +16,31 @@ from .engine import get_engine
 
 app = FastAPI(title="PAE")
 
+
+@app.exception_handler(runtime_health.EngineUnavailable)
+async def unavailable_response(request, exc):
+    return JSONResponse(status_code=503, content={"ok": False, "error": "engine_unavailable", "detail": str(exc)})
+
+
+@app.middleware("http")
+async def business_admission(request, call_next):
+    # Capabilities authenticate and gate themselves; diagnostics/static stay available.
+    path = request.url.path
+    business = path.startswith("/v1/") and path not in ("/v1/health", "/v1/config") and not path.startswith("/v1/cap/")
+    try:
+        if business:
+            await run_in_threadpool(lambda: get_engine().check_health())
+        response = await call_next(request)
+        if business:
+            await run_in_threadpool(lambda: get_engine().check_health())
+        return response
+    except runtime_health.EngineUnavailable as exc:
+        return await unavailable_response(request, exc)
+
+
 # 引擎配置：pae/config.json（相对本文件 ../../config.json）
-CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.json"
+from .paths import config_path
+CONFIG_PATH = config_path()
 
 
 def load_config() -> dict:
@@ -33,15 +58,13 @@ class AnnotateBody(BaseModel):
 
 @app.get("/v1/health")
 def health(resp: Response):
-    """存活 + 就绪。**必须真的触碰引擎**，否则会说谎。
+    """检查初始化及运行期可服务状态；隔离、关闭或未知事务返回503。
 
-    旧实现直接返回 ok:true，于是「词典缺失/损坏、库只读」时 health 一律绿，
-    而 status/annotate/event 全 500 —— 而 README 与 start_engine.bat 恰恰拿它当验收标准。
-    现在：引擎能构造 -> 200 ok:true；构造失败 -> 503 ok:false + 原因。
+    字典初始化错误仍保留安装提示；运行期检查不会提交或回滚业务事务。
     """
     from .engine import DB_PATH as _DB
     try:
-        get_engine()                     # 已构造过时是缓存命中，几乎零成本
+        get_engine().check_health()       # 同时检查运行期健康及遗留事务
     except Exception as e:
         resp.status_code = 503
         msg = "%s: %s" % (type(e).__name__, e)
@@ -148,17 +171,30 @@ def ext_stream(key: str = ""):
     from fastapi.responses import StreamingResponse
     from . import push as push_mod
 
+    engine = get_engine()
+    engine.check_health()
     q = push_mod.BUS.subscribe()
 
     def gen():
+        import queue
+        last_keepalive = time.monotonic()
         try:
+            runtime_health.check(engine)
             yield "event: hello\ndata: {}\n\n"
             while True:
+                runtime_health.check(engine)
                 try:
-                    ev = q.get(timeout=15)
-                    yield "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
-                except Exception:
-                    yield ": keepalive\n\n"
+                    ev = q.get(timeout=1)
+                except queue.Empty:
+                    runtime_health.check(engine)
+                    if time.monotonic() - last_keepalive >= 15:
+                        last_keepalive = time.monotonic()
+                        yield ": keepalive\n\n"
+                    continue
+                runtime_health.check(engine)
+                yield "data: " + json.dumps(ev, ensure_ascii=False) + "\n\n"
+        except runtime_health.EngineUnavailable:
+            return
         finally:
             push_mod.BUS.unsubscribe(q)
 
@@ -240,7 +276,7 @@ def persona_preview(body: PersonaBody):
 
 @app.post("/v1/persona")
 def persona_save(body: PersonaBody):
-    ok, issues, path = persona_mod.save_params(body.params)
+    ok, issues, path = get_engine().conn.health.publish(persona_mod.save_params, body.params)
     return {"ok": ok, "issues": issues, "saved_to": path}
 
 

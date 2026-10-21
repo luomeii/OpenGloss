@@ -10,6 +10,7 @@
   扩展上报 page_active_ms（页面活跃时长）≥ QUALIFIED_PAGE_MS 的曝光算合格。
   真正的「元素级视口停留」留待后续升级；此处如实标注 rule 版本与口径。
 """
+from .db_access import access, guarded, batched_rows
 import json
 import time
 
@@ -51,50 +52,54 @@ CREATE TABLE IF NOT EXISTS familiarity_projection (
 """
 
 
+@guarded
 def ensure_tables(conn):
     conn.executescript(DDL)
     conn.commit()
 
 
+@guarded
 def _exposure_stats(conn, window_days=WINDOW_DAYS):
     """按词统计曝光/悬停/点击/首次出现（全部来自已有事件）。"""
     since = int(time.time()) - int(window_days) * 86400
     stats = {}
-    for ts, etype, payload in conn.execute(
-            "SELECT ts, type, payload FROM events WHERE type IN ('annotation_shown','hover','known_click')",):
-        try:
-            p = json.loads(payload or "{}")
-        except Exception:
-            continue
-        lemma = p.get("lemma") or p.get("lemma_id")
-        if not lemma:
-            continue
-        s = stats.setdefault(lemma, {"q_exp": 0, "days": set(), "hover": 0, "click": 0,
-                                     "first_seen": None, "last_hover_at": None, "exp_buckets": set()})
-        if etype == "annotation_shown":
-            if s["first_seen"] is None or ts < s["first_seen"]:
-                s["first_seen"] = ts
-            if ts >= since:
-                vms = p.get("page_active_ms")
-                # 降级口径：没报 page_active_ms 的旧数据按「视为合格」处理（避免把历史数据全判为不合格）
-                if vms is None or int(vms) >= QUALIFIED_PAGE_MS:
-                    page = p.get("page_id") or ""
-                    bucket = (page, ts // 3600)
-                    if bucket not in s["exp_buckets"]:
-                        s["exp_buckets"].add(bucket)
-                        s["q_exp"] += 1
-                        s["days"].add(ts // 86400)
-        elif etype == "hover":
-            if ts >= since:
-                s["hover"] += 1
-            if s["last_hover_at"] is None or ts > s["last_hover_at"]:
-                s["last_hover_at"] = ts
-        elif etype == "known_click":
-            if ts >= since:
-                s["click"] += 1
+    with batched_rows(conn,
+            "SELECT ts, type, payload FROM events WHERE type IN ('annotation_shown','hover','known_click')") as rows:
+        for ts, etype, payload in rows:
+            try:
+                p = json.loads(payload or "{}")
+            except Exception:
+                continue
+            lemma = p.get("lemma") or p.get("lemma_id")
+            if not lemma:
+                continue
+            s = stats.setdefault(lemma, {"q_exp": 0, "days": set(), "hover": 0, "click": 0,
+                                         "first_seen": None, "last_hover_at": None, "exp_buckets": set()})
+            if etype == "annotation_shown":
+                if s["first_seen"] is None or ts < s["first_seen"]:
+                    s["first_seen"] = ts
+                if ts >= since:
+                    vms = p.get("page_active_ms")
+                    # 降级口径：没报 page_active_ms 的旧数据按「视为合格」处理（避免把历史数据全判为不合格）
+                    if vms is None or int(vms) >= QUALIFIED_PAGE_MS:
+                        page = p.get("page_id") or ""
+                        bucket = (page, ts // 3600)
+                        if bucket not in s["exp_buckets"]:
+                            s["exp_buckets"].add(bucket)
+                            s["q_exp"] += 1
+                            s["days"].add(ts // 86400)
+            elif etype == "hover":
+                if ts >= since:
+                    s["hover"] += 1
+                if s["last_hover_at"] is None or ts > s["last_hover_at"]:
+                    s["last_hover_at"] = ts
+            elif etype == "known_click":
+                if ts >= since:
+                    s["click"] += 1
     return stats
 
 
+@guarded
 def _overrides(conn):
     out = {}
     for lemma, action, ts, source in conn.execute(
@@ -103,6 +108,7 @@ def _overrides(conn):
     return out
 
 
+@guarded
 def evaluate(conn, engine_params, states, window_days=WINDOW_DAYS):
     """按 R1–R8 判定每个词是否「该被豁免」。返回 {lemma: {...}}（含未豁免的，便于审计）。"""
     stats = _exposure_stats(conn, window_days)
@@ -142,6 +148,7 @@ def evaluate(conn, engine_params, states, window_days=WINDOW_DAYS):
     return out
 
 
+@guarded
 def recompute(conn, engine_params, states, window_days=WINDOW_DAYS):
     """重算投影并落表（可反复重算，结果应完全一致——35 号 T8 要求）。"""
     ensure_tables(conn)
@@ -158,11 +165,13 @@ def recompute(conn, engine_params, states, window_days=WINDOW_DAYS):
     return res
 
 
+@guarded
 def exempt_set(conn):
     ensure_tables(conn)
     return [r[0] for r in conn.execute("SELECT lemma FROM familiarity_projection WHERE state='exempt'")]
 
 
+@guarded
 def shadow_report(conn, limit=20):
     """shadow 标定用：谁会被豁免、为什么、以及差点被豁免的（用于估误伤）。"""
     ensure_tables(conn)
@@ -178,6 +187,7 @@ def shadow_report(conn, limit=20):
             "note": "shadow 模式：这里列出的词**当前仍会被正常注解**，只是记录「如果启用会豁免谁」"}
 
 
+@guarded
 def restore(conn, lemma, actor="user"):
     """一键恢复：写 revoke 覆盖（R7 冷却 30 天），可选。"""
     ensure_tables(conn)

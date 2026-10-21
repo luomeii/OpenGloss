@@ -7,7 +7,9 @@
 - 提案过四道守门：结构 → 取值范围（RANGES）→ 冲突（同键冷却）→ 生效并留痕（decisions）。
 - 支持 ttl：到期自动回滚（读参数时惰性执行）。
 """
+from .db_access import access, guarded
 import json
+from .paths import config_path
 import time
 import uuid
 
@@ -24,7 +26,7 @@ def _cfg_defaults():
     """引擎旋钮的**初始值**来自 config.json（唯一真相源）；
     运行时改动走 params 表（覆盖层）。这样不再有「一半读 config 一半读表」的双源问题。"""
     try:
-        c = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        c = json.loads(config_path().read_text(encoding="utf-8"))
         return {"annotate_max_s": float(c.get("annotate_max_s", 0.75)),
                 "max_ann_per_page": int(c.get("max_ann_per_page", 40)),
                 "daily_say_cap": int(c.get("daily_say_cap", 10))}
@@ -88,23 +90,30 @@ def _now():
     return int(time.time())
 
 
+@guarded
 def revert_expired(conn):
     """惰性回滚：把已到期的覆盖删掉。返回被回滚的键列表。"""
     rows = list(conn.execute(
-        "SELECT key, decision_id FROM params WHERE expires_at IS NOT NULL AND expires_at <= ?",
+        "SELECT key, decision_id, expires_at FROM params WHERE expires_at IS NOT NULL AND expires_at <= ?",
         (_now(),)))
     if not rows:
         return []
-    for key, did in rows:
-        conn.execute("DELETE FROM params WHERE key = ?", (key,))
+    changed = []
+    for key, did, expiry in rows:
+        cursor = conn.execute("DELETE FROM params WHERE key = ? AND decision_id IS ? AND expires_at = ?",
+                              (key, did, expiry))
+        if cursor.rowcount != 1:
+            continue  # Another connection replaced the expired value after our SELECT.
+        changed.append(key)
         if did:
             conn.execute(
                 "UPDATE decisions SET effect_result = COALESCE(effect_result, ?) WHERE decision_id = ?",
                 ("auto_reverted_ttl", did))
     conn.commit()
-    return [k for k, _ in rows]
+    return changed
 
 
+@guarded
 def effective(conn):
     """DEFAULTS 加运行时覆盖（顺带回滚到期项）。"""
     revert_expired(conn)
@@ -117,6 +126,7 @@ def effective(conn):
     return p
 
 
+@guarded
 def current_overrides(conn):
     out = {}
     for key, value, actor, did, exp in conn.execute(
@@ -145,6 +155,7 @@ def _in_range(key, value):
     return True, v
 
 
+@guarded
 def _today_high_impact_count(conn):
     """今天已经生效的高影响变更次数（全局，不分 actor）。"""
     since = _now() // 86400 * 86400
@@ -159,6 +170,7 @@ def _today_high_impact_count(conn):
     return n
 
 
+@guarded
 def propose(conn, actor, patch, rationale="", evidence=None, ttl_days=None):
     """提交一单参数变更。返回 (ok, body)。
 
@@ -285,6 +297,7 @@ PERSONA_TRAIT_MAX_STEP = 0.05      # 单轴单次最多 ±0.05
 PERSONA_TRAIT_COOLDOWN_S = 7 * 86400  # 同一轴 7 天内只能被 AI 动一次
 
 
+@guarded
 def persona_guard(conn, actor, new_params):
     """校验 actor 能否这样改人格。返回 (ok, issues, changed_axes)。
 
@@ -326,6 +339,7 @@ def persona_guard(conn, actor, new_params):
     return True, [], axes
 
 
+@guarded
 def list_decisions(conn, actor=None, n=20):
     sql = ("SELECT decision_id, ts, actor, capability, patch, rationale, before, after, applied,"
            " gate_result, effect_result FROM decisions")

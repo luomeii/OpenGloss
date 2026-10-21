@@ -1,338 +1,205 @@
 # OpenGloss
 
-**被动英语习得引擎（Passive Acquisition Engine）——读英文网页时，词汇自己长进脑子里。**
+**在你本来就要读的英文网页上，提供低干扰的词级辅助。**
 
-> 阶段版本 **v0.3.0**（2026-10）｜Windows 优先（提供 .bat 脚本），Linux/macOS 可用等价的 uvicorn 命令（见下）
+自动标出生词，悬停看释义，熟悉后点「认识了」。你继续阅读，OpenGloss 在本机记录接触和交互，让后续标注参考你的使用历史。
 
-OpenGloss 不给你安排任何学习任务。你像平常一样读 GitHub README、技术文档、论文、论坛——它把生词自动标注出来，鼠标悬停就是释义，觉得会了点一下「认识了」。仅此而已。没有课程表，没有打卡，没有测验，没有复习卡片。
+无需背词表、打卡或做测验。它帮助你读下去；阅读得快、看过一次，并不代表已经记住一个词。
 
-英语是阅读的副产品，不是阅读之外的任务。
+> 当前为 **v0.4.0-rc.3 发布候选**。Windows 自包含安装、可选更新和恢复已实现，仍需补齐全新系统、真实浏览器与长期使用验收。尚未发布正式安装资产。
+>
+> **English** — Local-first vocabulary assistance for English web pages: inline highlights, hover definitions and a reading history that informs future annotations. No flashcards or quizzes. AI chat and memory are optional; core reading tools work without an API key. Windows installer candidate; browser extension installed manually.
 
-> **English summary** — A passive vocabulary acquisition engine for reading English on the web: unknown words get
-> annotated inline while you read, and you simply click "I know it" when you do. No flashcards, no quizzes, no streaks.
-> Local-first: everything lives in a single SQLite file on your machine, with zero telemetry. Built for people who read
-> English tech content daily and want vocabulary to accumulate as a by-product. (Currently Windows-first; the engine
-> itself is cross-platform.)
+## 阅读时是什么样
 
-## 它长什么样
+![浅色主题：英文网页上的词级标注和侧栏](docs/demo-1-light.png)
 
-![在 NASA 文章上：三色标注 + 浅色侧边栏](docs/demo-1-light.png)
+*网页正文保留原有排版，生词以三档颜色提示。侧栏展示最近接触的词和交互统计。*
 
-*在真实英文网页上（图为 NASA 的黑洞科普页，公有领域）：生词自动标注——琥珀=生词、蓝=学习带、青=快出带，颜色就是你对这个词的熟悉度；右侧栏实时显示掌握度指标与最近在啃的词，左上是角色名与版本号。*
+![暗色主题：悬停释义卡与认识了按钮](docs/demo-2-dark-hover.png)
 
-![悬停卡展开：释义 + 熟悉度 S 值 + 「认识了」，暗色主题](docs/demo-2-dark-hover.png)
+*悬停查看释义、熟悉度参考值和「认识了」按钮；浅色与暗色主题都可使用。*
 
-*鼠标停在被标词上：悬停卡给出释义、当前熟悉度（S 值）与「认识了」按钮——这是 OpenGloss 唯一的主动动作。上面两张也顺带演示了主题切换（羊皮纸 / 暗夜）。*
+<p align="center">
+  <img src="docs/demo-3-sidebar.png" alt="侧栏特写：阅读统计、最近接触的词与角色入口" width="380">
+  <br>
+  <em>侧栏特写：需要时再展开查看，正文阅读始终是主要操作。</em>
+</p>
 
-![侧栏特写：掌握度指标与最近在啃的词](docs/demo-3-sidebar.png)
+截图展示已有交互，界面版本号可能早于当前候选。
 
-*侧栏特写：上部「掌握度」是转化率 / 参与率 / 悬停率 / 点击率四项指标（各带样本量），下部「最近在啃」是最近接触的词、熟悉度圆环与释义；左上角是角色名与扩展版本号。*
+- **词级辅助**：标注、悬停释义、「认识了」；每内容块默认最多8词，整页最多40词。
+- **逐步适应**：接触、悬停和点击形成事件记录，熟悉度由规则重放计算。S值是系统估计，不是考试成绩或真实掌握证明。
+- **可选角色**：侧栏可查看近期词汇、事实卡和对话；配置模型后支持聊天及部分主动表达，不影响无模型时的基础阅读功能。
+- **本地优先**：词典、学习记录和配置保存在本机，没有使用数据遥测。模型外发内容见[隐私与数据](#隐私与数据)。
 
-打开任意英文网页，几秒后：
+## 选择安装方式
 
-- **三色标注**自动出现：🟡 生词（琥珀）/ 🔵 学习带（蓝）/ 🟢 快出带（青）——颜色就是你对这个词的熟悉度
-- **悬停卡**：释义 + 当前熟悉度 S 值 + 「认识了」按钮，250px 小卡不挡正文
-- **右下角小P**：常驻角色胶囊，点开侧栏看学习状态、最近在啃的词、它记住的事；能聊天，有长期记忆
-- 每个内容块最多标 8 个词（长文按 ~1400 字符分块，**整页上限 40**）——**阅读节奏是圣域，宁少勿多**
-
-## 为什么它不一样
-
-| | 市面产品 | OpenGloss |
+| | Windows自包含安装包 | 源码部署 |
 |---|---|---|
-| 触发方式 | 你主动打开 App | 读网页自动发生 |
-| 测验 | 单词卡、选择题 | **无任何测验**；「认识了」是唯一主动动作 |
-| 数据模型 | 黑盒进度条 | 事件溯源：每次遭遇/悬停/点击都是不可变事件，熟悉度由重放得出 |
-| 算法透明度 | 服务端随时改 | 内核语义冻结（哈希校验），每个参数有名字、区间和理由 |
-| AI 角色 | 客服/激励师 | 有界自主：改参数必须临时且限幅，用户写的事实 AI 永远不能抹 |
+| 适用 | 想直接使用的Windows 10/11 x64用户 | 想研究或修改代码的人 |
+| Python / pip / Git | 目标电脑不需要 | 需要Python，另装API依赖 |
+| 词典 | 包内已含完整公开词典 | 需单独下载或构建 |
+| 默认引擎地址 | `http://127.0.0.1:4817` | `http://127.0.0.1:4815` |
+| 配置与数据 | 安装目录的`data/` | 默认位于`pae/` |
+| 更新 | 管理页检查正式GitHub Release，用户选择安装 | 自行更新源码，保留个人配置与数据 |
 
-核心信念：**语言习得靠的是大量可理解输入，不是刻意练习。** OpenGloss 做的全部事情，就是把「可理解」这三个字自动化——在你本来就要读的内容上，把陌生的变成熟悉的。
+### Windows安装包
 
-## 快速开始
+安装候选目前仅供隔离内测。正式上传后，下载入口是[GitHub Releases](https://github.com/luomeii/OpenGloss/releases)中的 **`OpenGloss-windows-x64.zip`**。仓库「Download ZIP」是源码，不是安装包；若Release只有`dict.sqlite`，说明那里尚未提供安装版。
 
-需要 Python 3.10+。引擎内核纯标准库；API 层依赖 fastapi/pydantic/uvicorn（`pip install -r requirements.txt`）。
+1. 将完整ZIP解压到新文件夹，双击`Install.cmd`。
+2. 默认安装至`%LOCALAPPDATA%\OpenGloss`，创建当前用户桌面快捷方式并打开管理页。首次启动需加载完整词典，请等待安装器报告就绪。
+3. 在扩展管理页开启开发者模式，手动加载安装目录的`versions/当前版本/app/pae/extension`。
+4. 打开普通英文网页，稍等后悬停查看释义。安装包扩展默认连接4817，管理页默认使用4818。
 
-> ⚠️ **装 Python 时请勾选 Add python.exe to PATH**（官方安装器**默认不勾**）。忘了勾的话，四个 `.bat` 会直接报错提示你，不会假装成功——但引擎起不来。
-> 另：Windows 应用商店那个 `python` 是占位冒牌货——`where python` 找得到它，但它跑不了任何脚本（退出码非零）。
-> 所以脚本判真伪看的是 `python --version` 的**退出码是否为 0**，而不是 `where` 找不找得到。
+Chrome扩展页为`chrome://extensions`，Edge为`edge://extensions`。夸克的扩展加载和页面兼容性尚未通过独立验收，暂不承诺可用。
 
-### 1. 拿到词典（**第一次用必须先做这步**）
+程序在`versions/版本号/`，个人数据库、配置、人格和密钥文件在`data/`。安装器不自动读取或迁移其他项目的数据，不修改系统Python/PATH，不设置开机自启。端口占用时会报错，不停止占用者。
 
-词典（65 MB）不入库，二选一：
+详细步骤与隔离试用命令见[安装说明](distribution/README-INSTALL.md)。
 
-**方式一（省事·推荐）**：从 [Releases](https://github.com/luomeii/OpenGloss/releases/latest) 下载构建好的 `dict.sqlite`，
-放进 `resources/ECDICT/` 即可——不用下 63 MB 的 csv，也不用等构建。
+### 源码部署
 
-**方式二（自己构建）**：
+以下从仓库根目录开始。引擎代码需要Python 3.10+；安装包构建工具另需Python 3.12+。本轮实际回归使用Python 3.12/3.14，不能替代各平台和旧版本验收。
 
-```bash
-# 取 ECDICT 的 csv（MIT 许可，作者 skywind3000）——浅克隆最省事：
-git clone --depth 1 https://github.com/skywind3000/ECDICT /tmp/ecdict
-cp /tmp/ecdict/ecdict.csv resources/ECDICT/
-# 然后在仓库根目录构建（约 1-2 分钟）：
-python scripts/build_dict.py --csv resources/ECDICT/ecdict.csv --out resources/ECDICT/dict.sqlite
-```
+1. 从[词典发行页v0.3.1](https://github.com/luomeii/OpenGloss/releases/tag/v0.3.1)下载`dict.sqlite`，放到`resources/ECDICT/`。这是约65 MiB的公开词典，不是用户数据库。也可按[词典说明](resources/ECDICT/README.md)构建。
+2. 安装API依赖并启动：
 
-两条路产出的词典等价：77 万词条 + 5.8 万变形映射。详见 [resources/ECDICT/README.md](resources/ECDICT/README.md)。
-
-> ⚠️ **没有词典就起引擎的话**：引擎能起来，但 /v1/health 会返回 **503 + `ok:false`**，
-> 并带上 `hint` 告诉你缺什么；/v1/annotate 也会 500。所以务必先做这一步。
-> （旧版 health 在这种情况下会撒谎说 ok:true，已修。）
-
-### 2. 起引擎
-
-```bash
+```powershell
+python -m pip install -r requirements.txt
 cd pae
-start_engine.bat        # 或: python -m uvicorn pae_core.api:app --port 4815
+python -m uvicorn pae_core.api:app --host 127.0.0.1 --port 4815
 ```
 
-`start_engine.bat` 固定监听 4815，而且会**核对端口上那个引擎用的是不是本目录的 `pae.db`**：
-本目录的库 → `engine ready`；别人的库 → 立刻报 ERROR 并 `exit 1`（不会让你以为起好了）。
-要换端口或端口被别的程序占用时，直接用右边的 uvicorn 命令并改 `--port`。
+3. 等待`http://127.0.0.1:4815/v1/health`返回`ok: true`。返回值同时给出数据库路径，可核对预期实例。词典缺失或实例不可用时返回503。
+4. 在浏览器扩展管理页手动加载仓库的`pae/extension`，打开英文网页。
 
-> **Linux / macOS**：四个 .bat（start/stop/status/backup）是 Windows 专用，请直接用
-> `python -m uvicorn pae_core.api:app --port 4815` 起引擎，停止就 Ctrl-C。其余步骤完全一样。
+Windows也可在`pae/`使用`start_engine.bat`、`status_engine.bat`、`stop_engine.bat`和`backup.bat`。源码启动脚本固定4815，不要用来管理安装版或其他日用实例。开机自启脚本是源码部署的可选功能，安装版不自动启用。
 
-验证：http://127.0.0.1:4815/v1/health 返回 `{"ok":true}`。
-**首次启动要加载 65 MB 词典，约 25 秒**（机器忙时更久）——这期间 health 会阻塞或超时，属正常。
+## 模型与角色：可选配置
 
-#### 一键启动 / 关闭 / 开机自启（可选）
+**只用标注、词典释义和统计，不需要API key。** 没有模型时聊天不可用，主动表达有规则模板兜底。AI角色是补充功能，不是词级辅助的运行前提。
 
-`pae/` 里另有四个便捷脚本，**都是可选的**，不影响上面任何步骤：
+安装版：编辑管理页显示的`data/config.json`，在已有`llm`对象中填写供应商提供的地址、模型ID和key，保存后点击「重启此实例引擎」。
 
-| 文件 | 作用 |
+```json
+"llm": {
+  "base": "https://你的兼容服务地址",
+  "model": "供应商提供的模型ID",
+  "key": "你的API-key",
+  "thinking": "disabled"
+}
+```
+
+这是对象片段，需放进原配置，保留其他键。接入使用兼容`/v1/chat/completions`的接口，具体模型兼容性需实测。安装版为隔离个人环境，**不继承父进程的`PAE_LLM_*`或代理变量**，应在本实例配置中设置模型。
+
+源码版可用当前终端环境变量`PAE_LLM_BASE`、`PAE_LLM_MODEL`、`PAE_LLM_KEY`，再从同一终端启动；也可改`pae/config.json`。源码配置被Git追踪，**不要提交真实key或个人设置**。
+
+角色名字、口吻和设置可在人格面板调整。安装版个人修改写入`data/persona.json`，源码版默认写入`pae/persona/default.json`。
+
+## 更新、备份与回退
+
+安装版启动时检查公开GitHub Release，也可手动检查。只有版本高于当前、属于正式版、包含固定名`OpenGloss-windows-x64.zip`且有GitHub资产SHA256，才提供更新；预发布版本不会自动推送。
+
+用户选择更新后，管理器下载并校验包，停止此安装引擎，以SQLite backup API备份数据，再切换程序。校验失败保留当前版；新版启动检查失败时尝试恢复旧程序与备份，并明确报告结果。断网不影响已有词级辅助。
+
+**「回退上一版本」同时恢复更新前的数据快照**，不是只切换程序。更新后新增的记录不会出现在回退后的当前数据库中；回退前的最新数据会另存备份。更新需额外磁盘空间，保留的版本和备份目前需要用户自行管理。
+
+扩展需手动切换到新版目录并重新加载；引擎更新不会静默安装或更新扩展。
+
+- 安装版手工备份：先在管理页关闭此实例，确认退出，再复制整个`data/`。其中可能含密钥和对话，请私下保存。
+- 源码版运行中备份：用`pae/backup.bat`（或`python pae/backup.py`）生成SQLite一致性快照；个人配置、人格和密钥需另外保存。
+- 不要在运行中只复制`pae.db`。WAL模式的最新写入可能还在`pae.db-wal`。
+- 分享软件用原始发行ZIP，不要把已经用过的安装目录或个人备份重新打包分享。
+
+## 隐私与数据
+
+数据库包含词汇事件、悬停/点击时间、阅读句子片段、对话、事实卡及参数审计。熟悉度可由词汇事件重放；人格、配置和密钥还保存在另外的JSON文件中，并非所有个人数据都在一个数据库里。
+
+配置模型后，以下内容可能发送给你选择的模型服务：
+
+- 聊天输入、近期对话、人格提示、事实卡和相关词汇/指标上下文。
+- 启用的模型主动表达或智能体巡检所需上下文。
+- 悬停词所在句子（最多300字）：用于后台义项判定影子实验，日上限150次，结果只写缓存、不改变当前展示释义。侧栏「静音」不关闭这条路径。
+
+不配模型key时，上述模型请求无法使用。安装版管理器仍会连接公开GitHub查询发行信息，并在用户选择更新后下载包，不上传阅读记录、对话或密钥。扩展需读取网页文本才能标注，因此请求网站访问权限。
+
+清空个人数据前先关闭对应实例，再处理它自己的目录：安装版为`data/`；源码版默认为`pae/pae.db`及关联WAL/SHM、个人配置/人格/密钥。若使用自定义路径，按实际配置定位；备份也可能保留旧数据。
+
+## 当前验证与使用边界
+
+已有核心事务恢复、并发访问、记忆成对写入、TTL覆盖保护、安装校验和更新回退的自动化验证，以及完整词典下的本机隔离HTTP测试。扩展自动化以模拟场景为主。
+
+**仍需验收**：无Python的全新Windows 10/11、真实浏览器扩展联用（含夸克）、真实模型、正式GitHub安装资产的完整更新链与长期使用表现。本机短时通过不等于所有电脑都稳定，也不证明记忆效果。
+
+已知边界：
+
+- 引擎HTTP API默认无鉴权，只应监听本机回环，不要转发到局域网或公网。安装版管理页另有token、Origin和Host限制，不代表引擎API具备同样保护。
+- 页面主世界桥消息可被恶意页面伪造或监听，当前配额只能限制部分影响，扩展隔离世界迁移仍待完成。
+- `document.documentElement.dataset.paeDebug`可被页面脚本读取，包含本次注解结果。
+- 统计和每日额度以UTC换日，中国时区对应早上8点。交互统计不能直接当作学习成绩。
+- 冷重算仍会持锁，压力下存在延迟长尾，历史偶发提交长尾成因也尚未完全定位。没有为此降低数据库持久性设置。
+- 历史事件、判重集合与数据库会随使用增长，尚未完成长期内存和历史规模验收。
+- 引擎异常退出后，管理页可见未运行状态，可手动重启；当前不承诺自动崩溃重启。
+
+## 常见问题
+
+| 现象 | 排查 |
 |---|---|
-| `quick_start.bat` | **一键启动**：引擎在后台隐藏运行，本窗口 3 秒后自动关闭；失败时保留窗口给你看原因 |
-| `quick_stop.bat` | **一键关闭**：停掉引擎（会先核对身份，不会误杀别的程序） |
-| `autostart_on.bat` | **设置开机自启**：登录时自动（无窗口）拉起引擎。写当前用户的注册表 Run 项，**不需要管理员权限** |
-| `autostart_off.bat` | **取消开机自启**：删掉注册表项与它生成的启动器，安全、可重复执行 |
+| 找不到Install.cmd | 仓库源码ZIP不含生成的安装入口；安装包名为`OpenGloss-windows-x64.zip` |
+| 启动失败 | 看此实例`data/engine.log`或`data/manager-error.log`，检查端口和磁盘。源码版另确认词典 |
+| 页面没有标注 | 等health就绪；确认扩展开启、加载目录和引擎地址正确；刷新普通英文网页。浏览器内置页/PDF等未作兼容承诺 |
+| 不能聊天 | 检查本实例模型配置及供应商网络/额度；无key时基础功能仍可用 |
+| 暂无更新或检查失败 | 没有更高正式安装资产，或无法访问GitHub；不影响已启动引擎 |
+| 管理页刷新后提示重新打开 | 管理令牌由启动链接带入，用此安装快捷方式重新打开；勿分享带令牌原始链接 |
 
-> 前两个只是调用已有的 `start_engine.bat` / `stop_engine.bat`，没有新的启动逻辑。
-> 文件夹挪位置或改名后，重新跑一次 `autostart_on.bat` 即可（它记的是绝对路径）。
-> 四个文件都是纯 ASCII，**可以随意改名**（它们用 `%~dp0` 定位自己）。
+### 自定义端口
 
-### 3. 装浏览器扩展
+新安装可用`Install.cmd --root ".\OpenGloss-Trial" --port 54935`，管理页将使用54936。源码版用uvicorn的`--port`。先确认端口空闲，勿复用日用实例目录；同一安装重复运行不会更改已保存端口。
 
-- Chrome：`chrome://extensions` → 开发者模式 → 「加载已解压的扩展程序」→ 选 `pae/extension`
-- Edge：`edge://extensions` → 同样操作（Chromium 内核，完全兼容）
+**扩展弹窗没有地址输入框。** 在浏览器扩展页找到OpenGloss，打开「Service Worker / 检查视图」控制台，执行以下命令，将地址替换为本实例地址，再刷新英文页面：
 
-### 4. 打开任何英文网页
-
-生词几秒后自动出现。悬停、认识、继续读。
-
-### 5. 配置 LLM（可选，但想要「小P 会说话」就要配）
-
-OpenGloss 的**标注、悬停卡、统计**全部在本机完成，**不需要任何 API key**。
-只有和小P聊天、以及她的 LLM 版主动说话需要调用大模型。
-
-配置方式（任选其一，推荐环境变量）：
-
-```bash
-# 方式一：环境变量（推荐，不会进 git）
-set PAE_LLM_KEY=sk-你的key            # Windows CMD
-$env:PAE_LLM_KEY='sk-你的key'         # PowerShell
-set PAE_LLM_BASE=https://api.deepseek.com   # 默认就是 DeepSeek，换供应商时改
-set PAE_LLM_MODEL=deepseek-flash      # 模型 ID
+```javascript
+chrome.storage.local.set({ paeBase: 'http://127.0.0.1:54935' })
 ```
 
-```jsonc
-// 方式二：写进 pae/config.json 的 llm 段（注意：config.json 是被 git 追踪的文件，
-// 不要把真实 key 提交上去；仅本机自用时可以写）
-"llm": { "base": "https://api.deepseek.com", "model": "deepseek-flash", "key": "sk-..." }
+安装包扩展默认4817，源码扩展默认4815，请区分所用目录。每个扩展配置只连接一个引擎。
+
+## 开发与实现
+
+```text
+浏览器扩展 → 本机HTTP / SSE → 能力面与规则引擎 → SQLite
+                              ├─ 词级标注与事件重放
+                              ├─ 记忆、会话与参数审计
+                              └─ 可选LLM / MCP接入
+安装管理器 → GitHub Release检查 / 校验 / 版本切换与恢复
 ```
 
-**没配 key 会怎样**：标注、悬停、侧栏统计、主动说话的规则版模板句——全部照常；
-只有「和她聊天」与「LLM 版主动说话」不可用（前者会返回引擎错误提示，后者自动退回模板句）。
+`state.py`、`fold.py`、`lemmatize.py`保留冻结语义及哈希校验。AI提案调参受限幅、TTL与审计约束，不自动证明调参对学习有效。核心算法、影子实验和产品效果需分别验证。
 
-## 开发与测试
+安全运行本阶段安装与恢复合同：
 
-跑测试需要额外装依赖：`pip install -r requirements-dev.txt`
-（含 pytest；**浏览器端 12 个脚本还需要 playwright**：`playwright install chromium`）。
-
-> 磁盘：跑测试要额外约 **700 MB 以上**（playwright 的 chromium 432 MB + headless shell 271 MB；
-> 若保留多个修订版本会到 1 GB 以上）。
-> 四个 `.bat`（start/stop/status/backup）**必须留在 `pae/` 目录里运行**——它们第一句就是 `cd /d "%~dp0"`，复制到别处会找不到 `pae_core`。
-> 改这些 `.bat` 时**保持纯 ASCII**：cmd.exe 按系统 OEM 代码页读 .bat，中文注释会乱码甚至被误解析。
-
-两条前置：**① 先按第 1 步建好词典**（单测里 test_full_coverage 直接读 dict.sqlite，没建就跑会挂）；
-**② 测试脚本是 Windows 专用的**（用 `netstat` + `taskkill` 管端口），Linux/macOS 上引擎能跑但验收脚本跑不了。
-
-```bash
-cd pae
-python -m pytest pae_core -q          # 单元测试（34 项，不碰引擎端口）
-python -X utf8 tests/nightly.py       # 全量验收（30 项）
+```powershell
+python -m unittest discover -s distribution/tests -p "test_*.py" -v
+node distribution/tests/test_popup.cjs
 ```
 
-> ⚠️ **测试会接管 4815 端口**：多数测试脚本内含 `kill_port(4815)`（taskkill /F），
-> 也就是说——**如果你正在跑引擎，跑测试会把它杀掉**。先停引擎再跑，或改 `pae/config.json` 与测试里的端口。
+历史`pae/tests`部分端到端脚本会接管或停止4815，**不要在现用引擎运行时直接执行**。开发依赖见`requirements-dev.txt`；浏览器测试还需额外浏览器环境。
 
-## 它怎么工作
+[构建与发行验收](distribution/BUILDING.md) · [固定公开输入与SHA256](distribution/inputs.lock.json) · [MCP接入](skills/pae-bridge/SKILL.md)
 
-```
-浏览器扩展（Shadow DOM 零污染外壳）
-  ├─ CSS Custom Highlight API 三档分色（主世界注入）
-  ├─ 悬停卡 / 认识了 / 侧栏（对话窗·掌握度圆环·词行·事实印章）
-  └─ Service Worker ⇄ HTTP + SSE ⇄ 引擎
-HTTP API + MCP 双传输（同一能力面 42 项 = 41 实现 + 1 项如实标注未实现，同一套门禁）
-引擎内核
-  ├─ 选择层：学习带 S∈[0.10,0.55] 优先 · 贴边缘优先 · 每请求预算 8 词（长文分块，整页上限 40）
-  ├─ S 值：事件重放（遭遇累积·90天半衰期·悬停+0.3·认识了+4.5）
-  ├─ 冻结内核：state/fold/lemmatize 语义冻结 + 哈希校验
-  └─ 主动说话：规则版兜底 + LLM 版（日≤2条，带人格与对话上下文）
-SQLite（WAL）：events 只追加 · facts · chat_turns · push_log · decisions
-```
+源码可通过`python pae/mcp_server.py`提供MCP，key和权限见接入说明。内部命名仍为`pae`，用于保持目录、数据库、环境变量及能力名兼容。注释中的历史规格编号是开发溯源，不要求读者拥有私有规划文档。
 
-几个值得说的设计决定：
+## 后续重点
 
-- **事件溯源**：你的学习历史是一串只追加的事件，熟悉度随时可以从零重放出来。数据是你的，全在本地一个 `pae.db`，备份 = 复制文件。
-- **冻结内核**：核心算法三文件语义冻结，改动必须过三道同步（哈希/SPEC/EXPECTED）——防的是「算法在无人察觉时漂移」。
-- **有界自主**：AI 想调参数？必须临时（ttl）、限幅（高影响键步长≤区间20%）、留痕（decisions 表可审计）、且自我约束类参数只能收紧不能放宽。AI 想抹你写的事实？直接被拒。
-- **零遥测**：引擎唯一的网络出向是你自己配置的 LLM API，扩展只跟本机 4815 说话。无打点、无上报、无云。
-
-## 隐私
-
-- **扩展为什么要「读取所有网站」权限**：装扩展时浏览器会提示 OpenGloss 可读取你访问的所有网页——
-  这是标注功能的前提（它需要读页面文本才知道哪些词要标）。标注与统计**全部在本机完成**。
-- 所有数据本地：学习记录、对话、事实、参数——一个 `pae.db`
-- **库里到底存了什么**（如实列出）：词与熟悉度、悬停/点击时间线、**你读过页面的句子片段**
-  （每条遭遇存该页 200 字、悬停时另存该句 300 字，用于义项判定与上下文）、对话轮次、事实卡、参数变更审计
-- **什么会离开本机**（如实列出，就这三条）：
-  ① 你对她说的话 → 送 LLM 生成回复；
-  ② 悬停带句子的词 → 该句（≤300 字）送 LLM 做义项判定影子实验（日限 150 次，只写缓存、不影响行为）；
-  ③ 聊天时引擎还会把「事实卡 + 最近在啃的词 + 指标」拼进系统提示词一起送出去（这是她记得住你的原因）。
-  **不配 LLM key 则以上三条全不发生**；标注、悬停卡、统计完全在本机。
-- 想清空（三处都要清，少了不算干净）：
-  1. 停引擎，删 `pae/pae.db`（学习记录+对话+事实）
-  2. 人格设定在 `pae/persona/default.json` —— 那是**被 git 追踪**的文件，改过记得别提交，或直接改回默认
-  3. 外部接入的 key 在 `pae/keys.json`（本机自用不存在这个文件）
-- 想备份：**直接跑 `pae/backup.bat`**（或 `python pae/backup.py`）——**引擎开着也能跑**。
-  它用 SQLite 的 `VACUUM INTO` 生成**自洽的单文件快照**，成功前会自己校验（事件数一致 + integrity ok），
-  带时间戳、保留最近 10 份。
-- ⚠️ **别手工复制 `pae.db`**：引擎用 WAL 模式，新写入先落在 `pae.db-wal`，只拷主文件会丢最后一批数据；
-  极端情况下拷出来是**有表无数据的空库**，而它的 `integrity_check` 依然报 ok——好坏肉眼分辨不出来。
-  实测：引擎运行中已写入 8 条时，只拷主文件 → 备份里 0 条；跑 `backup.bat` → 8 条。**先停引擎也救不了**，
-  因为 `stop_engine.bat` 是强杀，不做 checkpoint。
-
-## 安全
-
-**已加固**（2026-10 设计评审后）：
-- **花费封顶**：pae.persona.say（真实 LLM 调用）日限 120 次；known_click（直接影响熟悉度）日总量 60 次——即使被伪造请求，伤害也被配额封顶
-- **有界自主**：AI 提案的 ttl 封顶 30 天（防「100 年后过期」变相永久化）；人格身份字段缺省即拒绝（防 AI 省略字段静默清空设定）
-- **写路径串行**：SQLite 写操作统一持锁，避开多线程并发踩事务与语句缓存冲突
-
-**已知边界（如实说明，别在不受信任的页面上用）**：
-
-1. **桥消息可被页面伪造/监听**：角色壳跑在页面主世界（这是 CSS Custom Highlight API 的要求——隔离世界注册的高亮不绘制），
-   而页面脚本与主世界共享 `window`。因此**恶意页面可以**：伪造`postMessage` 驱动角色说话（消耗你的 LLM 额度）、
-   监听角色回复与侧栏历史回灌、伪造「认识了」事件影响词库。引擎侧的日限额封顶了实际损失，
-   **但这层桥目前没有密码学防护**——根治需要把角色壳迁到扩展隔离世界（已在路线图）。
-2. **本地 API 默认无鉴权**：引擎监听 127.0.0.1:4815，本机任何进程都能调用全部能力（含读记忆、改参数）。
-   这是单机自用工具的有意设计；**不要把它转发/暴露到局域网或公网**（也没有 Host 校验，存在 DNS rebinding 面）。
-3. **悬停会触发一次 LLM 调用（仅在配了 key 时）**：悬停带句子的词时，引擎会把**该句**（≤300 字）
-   送 LLM 做义项判定的影子实验，每天上限 150 次，结果只写缓存不影响行为。不想外发页面句子，就别配 LLM key。
-   注意：侧栏的「静音」按钮只管主动说话，**不挡这条影子判定**。
-4. **调试通道常开**：本次注解结果（词/释义/S 值）会写在页面的 `document.documentElement.dataset.paeDebug` 上——
-   页面脚本可读。它是验收测试的观测口（有意保留），介意的话可以在 content.js 里注释掉那段。
-
-**你的数据在哪**：全部在本机一个 pae.db。扩展只与 127.0.0.1:4815 通信，无遥测、无打点、无云端。
-
-## 适合谁
-
-**适合**：每天读英文 ≥30 分钟（开发者/研究者/技术爱好者）、讨厌背单词讨厌打卡、接受「慢慢来但每天不停」的人。词汇增长速度 ≈ 你阅读量的函数。
-
-**不适合**：要应试提分（无冲刺机制）、要口语听力（纯视觉通道）、想要课程结构的人。
-
-**和四六级的关系（如实说明）**：词典数据（ECDICT）**自带考试大纲标注**——其中四级词条 3,849 个、六级更多。
-你在真实阅读里遇到的这些词会被正常标注、正常记账，**不需要背词表**，读完一段时间自然会覆盖到相当一部分。
-但它**不按考试筛词、不刷题、不做冲刺**——想靠它突击提分的话，它帮不上（这是设计取舍，不是缺陷）。
-
-## 路线图
-
-- [ ] 熟悉度豁免 enforce 模式晋升门（影子数据积累中）
-- [ ] 换脑实测（llm.py 单接缝，换模型一行配置——但还没真换过）
-- [ ] 义项判定 L1 搭配键优化（影子数据积累中）
-- [ ] 语法层（诚实 stub 中，不装）
-- [ ] 角色壳迁移到扩展隔离世界（消除主世界桥的被动监听面）
-
-## 故障排查
-
-| 症状 | 先查什么 |
-|---|---|
-| **刚克隆完，health 就返回 503**（说词典缺失/损坏），annotate 也全 500 | 你跳过了**第 1 步** —— `dict.sqlite` 有 65 MB，不在仓库里（.gitignore 排除），要去 **Releases** 下载后放进 `resources/ECDICT/`。这是**第 0 步**，不是可选步骤 |
-| 趋势图上「今天」是空的，或凌晨学的内容算到了昨天 | **日界是 UTC，不是本地时间**。引擎里所有按天分桶（趋势、每日配额、主动说话次数）统一用 UTC 日，所以对 UTC+8 来说是**本地早上 8 点换日**。这是为了避免「趋势按本地日、配额按 UTC 日」两边差 8 小时 |
-| **引擎起了但什么都 500**（`/v1/status`、`/v1/annotate` 全挂，health 却是 200） | 新版 health 会**真的触碰引擎**：词典缺失/损坏或库只读时它返回 **503 + `ok:false` + 原因**，不再假装健康。先看它给的原因 |
-| 用 `curl` 发中文 JSON 报解析错 | 中文 Windows 的 cmd/Git Bash 会把中文按 **GBK** 编码送出去，服务端按 UTF-8 解就炸。改 PowerShell 的 `Invoke-RestMethod` 或 Python 客户端 |
-| 页面完全不标注 | ① **浏览器够新吗**（需要 Chrome/Edge **105+**，高亮用 CSS Custom Highlight API；老版本会静默不标注）② 引擎起了吗（health 返回 `ok:true`；**没词典时它会返 503**，那就先补第 1 步）③ **词典建了吗**（没词典时 health 仍 ok，但 annotate 会 500）④ 扩展开关开了吗 ⑤ 首次加载词典要等十几秒 |
-| 引擎活着但 /v1/annotate 返回 500 | 词典缺失或路径不对——确认 `resources/ECDICT/dict.sqlite` 存在；不存在就从 [Releases](https://github.com/luomeii/OpenGloss/releases/latest) 下 `dict.sqlite`，或跑构建脚本 |
-| 扩展装了但没反应 | 打开扩展弹窗看状态；确认扩展里配的引擎地址与引擎端口一致（换端口见下） |
-| 侧栏指标全是 0 / 空 | 多数情况正常：转化率要「首遇满 7 天」的成熟词才有数；悬停率/点击率要你真悬停/点击过才有 |
-| 她（小P）不主动说话 | 主动说话有门槛（45 次新曝光 + 距今 30 分钟 + 日 3 条）且要求你在读英文页；想直接验证就用侧栏输入框跟她说话 |
-| 聊天回复为空 | 没配 LLM key（见「配置 LLM」）。不配 key 时标注等功能全部照常 |
-| 测试跑完引擎没了 | 测试会接管 4815 端口（见「开发与测试」），重新起引擎即可 |
-
-### 换引擎端口（两侧都要改）
-
-1. **引擎侧**：`python -m uvicorn pae_core.api:app --port 5000`
-2. **扩展侧**：当前版本的弹窗里没有端口输入框。打开 `chrome://extensions` → 找到 OpenGloss →
-   点「Service Worker / 检查视图」打开控制台，执行
-   `chrome.storage.local.set({ paeBase: 'http://127.0.0.1:5000' })`，再刷新页面。
-
-## 配置项参考
-
-`pae/config.json` 是引擎主配置（全部可选，默认值即可用）：
-
-| 键 | 默认 | 作用 |
-|---|---|---|
-| `annotate_max_s` | 0.75 | 熟悉度 S 超过它就不再标注 |
-| `budget` | 8 | **每请求**的注解预算（长页面按 ~1400 字符分块，每块一份预算；整页由扩展的 annCap 限 40） |
-| `bnc_known_rank` | 0 | 0 = 不做词频假设（全当生词）；设 >0 则 BNC 排名 ≤ 该值的词视为已知 |
-| `engine.dict_path` / `engine.lemma_path` | ../resources/ECDICT/… | 词典与词形表位置（相对 `pae/` 目录） |
-| `llm.base` / `llm.model` / `llm.thinking` | deepseek / deepseek-flash / disabled | LLM 接入；key 建议用环境变量。**默认模型是 `deepseek-flash`**（config.json 是唯一真相源；代码里另有 `deepseek-chat` 兜底，只在 config.json 缺失/读不到时生效） |
-| `agent_schedule` | 关闭 | 后台定时巡检（默认关：每次巡检都是真实花费） |
-| `familiarity_mode` | shadow | `shadow` 只记录不改行为；`enforce` 才真的豁免反复被无视的词 |
-| `selection_mode` | band_priority | 选择层策略；`text_order` 是旧行为 |
-| `chat_history_turns` | 64 | 送给 LLM 的历史轮数（约 32 次问答） |
-| `proactive_llm` / `proactive_llm_daily_max` | true / 2 | 主动说话里走 LLM 的条数上限（其余用模板句） |
-
-环境变量（覆盖配置，适合迁移/多机）：`PAE_DB_PATH`（数据库位置，**所在目录要先存在**，sqlite 不会自动建目录）、`PAE_LEMMA_PATH`、
-`PAE_DICT_PATH`、*PAE_ROOT*、`PAE_LLM_KEY`、`PAE_LLM_BASE`、`PAE_LLM_MODEL`。
-
-> 小提示：把仓库放在**中文路径**下时，个别场景可能遇到编码坑（构建脚本与文档都建议用相对路径执行）。
-
-## 外部智能体接入（MCP）
-
-浏览器扩展之外，OpenGloss 的能力面（42 项，其中 41 项已实现）也能通过 MCP 给外部 AI 使用（同一套门禁与审计）：
-
-```bash
-claude mcp add pae -- python pae/mcp_server.py    # 以 Claude Code 为例，其它 MCP 客户端同理
-# mcp_server.py 启动时会把 stdin/stdout 自我重定向为 UTF-8（MCP stdio 规范要求 UTF-8，
-# 而中文 Windows 的默认 stdout 编码是 cp936），所以**不需要**加 -X utf8。
-```
-
-外部接入需要签发 key：在 `pae/` 目录下跑 `python -m pae_core.keys issue <名字>`（本机自用不需要）。
-给外部 AI 的操作手册在 `skills/pae-bridge/SKILL.md`。
-
-## 关于代码注释里的编号
-
-你会看到「26 号算法规格」「35 号规格」「M12-C」「H2」「P0-3」这类编号——它们是**开发期内部文档与评审的编号**，
-那些文档没有随本仓库发布（项目从一份很长的私有设计与审计记录里长出来）。它们只是溯源线索，
-**不影响阅读代码**：每个机制在代码里都有自解释的注释与对应的验收测试（`tests/t*.py`）。
+- 全新系统、真实扩展、真实更新和长期稳定性验收。
+- 用实际阅读反馈评估标注密度、熟悉度估计和重复接触效果。
+- 逐步收紧页面桥边界，优化扩展地址配置体验。
+- 影子实验先积累证据，再决定是否改变用户可见行为。
 
 ## 许可
 
-本仓库代码与文档：**MIT**（见 [LICENSE](LICENSE)）。
-词典数据来自 [ECDICT](https://github.com/skywind3000/ECDICT)，遵循其 MIT 许可，使用时请保留署名。
+代码与文档采用[MIT](LICENSE)。公开词典来自[ECDICT](https://github.com/skywind3000/ECDICT)，保留许可及署名。
 
-**第三方例外（重要）**：随仓库分发的 `resources/ECDICT/lemma.en.txt` 采用其**文件自带抬头**的声明——
-「free to use for any research and/or educational purposes」，**比 MIT 更窄**（不含商业用途的默示授权）。
-商用或再分发前请先读该文件头部的原文，或联系其作者。
-
-> 可能关心：AI 角色的提示词在哪？—— pae/persona/ 下，人格参数与模板分离，改名字改口吻随手改。
->
-> 关于命名：项目叫 **OpenGloss**，但代码里的内部标识仍沿用 **`pae`**（目录 `pae/`、数据库 `pae.db`、环境变量 `PAE_LLM_*`、能力名 `pae.*`）——那是引擎代号，改名会破坏已有数据和配置兼容，故保留。
-
----
-
-**关键词 / Keywords**：英语学习 · 背单词替代 · 生词自动标注 · 英语四级 · 大学英语四级 · 英语六级 · 大学英语六级 ·
-四六级词汇 · 六级词汇 · 被动习得 · 可理解输入 · 阅读辅助 · 浏览器扩展 · 本地优先 · 隐私 · 事件溯源 · 不打卡不测验 ｜
-English vocabulary · CET-4 · CET-6 · passive acquisition · comprehensible input · browser extension ·
-Chrome · Edge · Manifest V3 · local-first · self-hosted · no flashcards · MCP
+`resources/ECDICT/lemma.en.txt`另有文件头声明，仅明确允许研究和教育用途，不能概括为全部MIT；商用或再分发前应核对原声明。

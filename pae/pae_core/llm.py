@@ -12,7 +12,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "config.json"
+from .paths import config_path
+CONFIG = config_path()
 
 DEFAULTS = {"base": "https://api.deepseek.com", "model": "deepseek-chat", "key": "", "thinking": "disabled"}
 
