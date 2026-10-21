@@ -4,11 +4,6 @@ function paeNorm(v) {
   while (s.length && s.charAt(s.length - 1) === '/') { s = s.slice(0, -1); }
   return s || 'http://127.0.0.1:4815';
 }
-try {
-  chrome.storage.local.get({ paeBase: 'http://127.0.0.1:4815' }, function (s) {
-    if (s && s.paeBase) { PAE_POPUP_BASE = paeNorm(s.paeBase); }
-  });
-} catch (e) {}
 'use strict';
 function setUI(enabled) {
   const btn = document.getElementById('pae-toggle');
@@ -25,6 +20,14 @@ document.getElementById('pae-toggle').addEventListener('click', () => {
   });
 });
 chrome.storage.local.get({ paeEnabled: true }, (s) => setUI(s.paeEnabled));
-fetch(PAE_POPUP_BASE + '/v1/health', { method: 'GET' })
-  .then(r => { document.getElementById('eng').textContent = r.ok ? 'running' : 'error ' + r.status; })
-  .catch(() => { document.getElementById('eng').textContent = 'down'; });
+function updateEngineStatus() {
+  fetch(PAE_POPUP_BASE + '/v1/health', { method: 'GET' })
+    .then(r => { document.getElementById('eng').textContent = r.ok ? 'running' : 'error ' + r.status; })
+    .catch(() => { document.getElementById('eng').textContent = 'down'; });
+}
+try {
+  chrome.storage.local.get({ paeBase: 'http://127.0.0.1:4815' }, function (s) {
+    PAE_POPUP_BASE = paeNorm(s && s.paeBase);
+    updateEngineStatus();
+  });
+} catch (e) { updateEngineStatus(); }

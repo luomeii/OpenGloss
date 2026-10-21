@@ -1,4 +1,7 @@
 """PAE engine service logic (no HTTP). Events -> states -> annotations."""
+from . import health
+from .event_batch import EventBatch
+from .db_access import access, guarded
 import hashlib
 import re
 import threading
@@ -39,7 +42,8 @@ import os as _os
 import json as _json
 from pathlib import Path as _Path
 
-_cfg_path = _Path(__file__).resolve().parents[1] / 'config.json'
+from .paths import config_path as _config_path
+_cfg_path = _config_path()
 try:
     _cfg = _json.loads(_cfg_path.read_text(encoding='utf-8'))
 except Exception:
@@ -79,12 +83,14 @@ class Engine:
             from . import params as _params_mod
             self.params = _params_mod.effective(self.conn)
         except Exception:
+            health.require_clean(self.conn)
             self.params = dict(DEFAULTS)
-        self.lock = threading.Lock()
+        self.lock = self.conn.access_lock
         self.states = {}
         self.seen_idem = set()
         self._replay()
 
+    @guarded
     def _replay(self):
         for ev in load_events(self.conn):
             payload = ev.get("payload") or {}
@@ -126,7 +132,9 @@ class Engine:
             frontier = nxt
         return ordered
 
+    @guarded
     def annotate(self, text, page_id, session_id=None):
+        health.require_clean(self.conn)
         text = text or ""
         page_id = str(page_id)
         # 参数陈旧就刷新（最多滞后 5 秒）——ttl 到期自动回滚靠这个生效
@@ -144,6 +152,7 @@ class Engine:
                 else:
                     self._fam_exempt = set()
             except Exception:
+                health.require_clean(self.conn)
                 self._fam_exempt = set()
             self._fam_ts = time.time()
         tokens = [t.lower() for t in TOKEN_RE.findall(text)]
@@ -217,88 +226,79 @@ class Engine:
             _cands.sort(key=lambda _c: (-_prio(_c), abs(_c[1] - _mid)))
         chosen = set(_c[0] for _c in _cands[:BUDGET])
 
-        for tok in tokens:
-            if tok in STOPWORDS:
-                continue
-            if len(tok) < 3:  # P0-3 2b: 单/双字符 token 无学习价值
-                continue
-            chain = self.reduce_chain(tok)
-            # 选择策略：在词典命中的候选中取链条最靠后的（最还原形）。
-            # 变形词(intensified/threads)在词典里有独立词条，但记账户必须归一到原形(intensify/thread)。
-            lemma = None
-            for cand in reversed(chain):
-                if cand in self.translations:
-                    lemma = cand
-                    break
-            if lemma is None:
-                lemma = tok
-            if lemma in first_seen:
-                continue
-            entry = self.translations.get(lemma)
-            gloss = (entry[0] or "").strip() if entry and entry[0] else ""
-            if not gloss:  # P0-3 2a: 无释义不注（用户名/拼错词不进账本、不占预算）
-                continue
-            bnc = entry[1] if entry and len(entry) > 1 else 0
-            if bnc and 0 < bnc <= BNC_KNOWN_RANK:  # P0-3 2c: 已知高频词跳过
-                continue
-            first_seen.add(lemma)
-            if lemma not in chosen:   # 只记被选中的词（选择已由 Phase 1 决定）
-                continue
-            idem_key = hashlib.sha1(
-                ("%s|%s|%d" % (page_id, lemma, day_bucket)).encode("utf-8")
-            ).hexdigest()[:20]
-            payload = {
-                "lemma_id": lemma,
-                "lemma": lemma,
-                "surface": tok,
-                "sentence_context": text[:200],
-                "page_id": page_id,
-                "session_id": session_id,
-            }
-            with self.lock:
-                # 内存判重优先：seen_idem 命中则不碰数据库
-                if idem_key in self.seen_idem:
-                    event_id = None
-                else:
-                    event_id = append_event(self.conn, "encounter", payload,
-                                            idem_key=idem_key, source="api",
-                                            autocommit=False)
-                    if event_id is not None:
-                        folded = dict(payload)
-                        folded["ts"] = now
-                        folded["type"] = "encounter"
-                        folded["idem_key"] = idem_key
-                        fold_event(self.states, folded, self.params, self.seen_idem)
-                st = self.states.get((lemma, 0))
-                s = st.s_value(self.params) if st is not None else 0.0
-            # 熟悉度影子集：**仅 enforce 模式**才真的跳过（默认 shadow=只记录，行为零变化）
-            if getattr(self, "_fam_mode", None) == "enforce":
-                if lemma in self._fam_exempt:
+        with EventBatch(self) as batch:
+            for tok in tokens:
+                if tok in STOPWORDS:
                     continue
-            # 注解门槛取「有效参数」（可被 AI 提案调整）；pinned/mastered 对齐 26 号 decide() 语义
-            max_s = float(self.params.get("annotate_max_s", ANNOTATE_MAX_S))
-            if st is not None and getattr(st, "mastered", False):
-                continue
-            if s < max_s or (st is not None and getattr(st, "pinned", False)):
-                out.append({
-                    "surface": tok,
+                if len(tok) < 3:  # P0-3 2b: 单/双字符 token 无学习价值
+                    continue
+                chain = self.reduce_chain(tok)
+                # 选择策略：在词典命中的候选中取链条最靠后的（最还原形）。
+                # 变形词(intensified/threads)在词典里有独立词条，但记账户必须归一到原形(intensify/thread)。
+                lemma = None
+                for cand in reversed(chain):
+                    if cand in self.translations:
+                        lemma = cand
+                        break
+                if lemma is None:
+                    lemma = tok
+                if lemma in first_seen:
+                    continue
+                entry = self.translations.get(lemma)
+                gloss = (entry[0] or "").strip() if entry and entry[0] else ""
+                if not gloss:  # P0-3 2a: 无释义不注（用户名/拼错词不进账本、不占预算）
+                    continue
+                bnc = entry[1] if entry and len(entry) > 1 else 0
+                if bnc and 0 < bnc <= BNC_KNOWN_RANK:  # P0-3 2c: 已知高频词跳过
+                    continue
+                first_seen.add(lemma)
+                if lemma not in chosen:   # 只记被选中的词（选择已由 Phase 1 决定）
+                    continue
+                idem_key = hashlib.sha1(
+                    ("%s|%s|%d" % (page_id, lemma, day_bucket)).encode("utf-8")
+                ).hexdigest()[:20]
+                payload = {
+                    "lemma_id": lemma,
                     "lemma": lemma,
-                    "gloss": gloss,
-                    "s_value": round(s, 3),
-                    "counted": event_id is not None,
-                })
-            if len(out) >= BUDGET:
-                break
-        # 批量事务：整个请求的所有事件一次提交（性能：数百次fsync→1次）。
-        # H3 修复（评审 2026-10-03）：commit 必须持锁——共享连接上事务边界属于连接
-        # 不属于线程，后台线程（主动说话/悬停影子）的 commit 会提前落地本批事件，
-        # 并发相同 SQL 还会撞 sqlite3 语句缓存产生 API misuse 硬异常。
-        # 锁内提交 = 与 record_event 同样的串行化纪律。
-        with self.lock:
-            try:
-                self.conn.commit()
-            except Exception:
-                pass
+                    "surface": tok,
+                    "sentence_context": text[:200],
+                    "page_id": page_id,
+                    "session_id": session_id,
+                }
+                with self.lock:
+                    # 内存判重优先：seen_idem 命中则不碰数据库
+                    if idem_key in self.seen_idem:
+                        event_id = None
+                    else:
+                        event_id = append_event(self.conn, "encounter", payload,
+                                                idem_key=idem_key, source="api",
+                                                autocommit=False)
+                        if event_id is not None:
+                            folded = dict(payload)
+                            folded["ts"] = now
+                            folded["type"] = "encounter"
+                            folded["idem_key"] = idem_key
+                            batch.fold(event_id, folded, fold_event)
+                    st = batch.state((lemma, 0))
+                    s = st.s_value(self.params) if st is not None else 0.0
+                # 熟悉度影子集：**仅 enforce 模式**才真的跳过（默认 shadow=只记录，行为零变化）
+                if getattr(self, "_fam_mode", None) == "enforce":
+                    if lemma in self._fam_exempt:
+                        continue
+                # 注解门槛取「有效参数」（可被 AI 提案调整）；pinned/mastered 对齐 26 号 decide() 语义
+                max_s = float(self.params.get("annotate_max_s", ANNOTATE_MAX_S))
+                if st is not None and getattr(st, "mastered", False):
+                    continue
+                if s < max_s or (st is not None and getattr(st, "pinned", False)):
+                    out.append({
+                        "surface": tok,
+                        "lemma": lemma,
+                        "gloss": gloss,
+                        "s_value": round(s, 3),
+                        "counted": event_id is not None,
+                    })
+                if len(out) >= BUDGET:
+                    break
         # 主动说话（问题一修复，2026-10-03）：规则版自发触发，补上引擎侧唯一缺失的 say 生产者。
         # 2026-10-03 二次反馈升级：命中触发时可能走 LLM（1-2 秒）——绝不能挂在注解响应里
         # 拖慢页面（用户红线：不许拖慢阅读），改为**后台线程派发**：每个引擎实例 ≥300s
@@ -315,6 +315,7 @@ class Engine:
             pass
         return out
 
+    @guarded
     def record_event(self, etype, lemma, surface="", metas=None, source="ext"):
         """扩展上报的观察/交互事件（三证据的发射口）。
 
@@ -322,6 +323,7 @@ class Engine:
         - hover：+0.3 权重，按 (lemma, session, 小时) 去重（防悬停刷分）
         - known_click：+1.5 权重，按 (lemma, 天) 去重（防连点）
         """
+        health.require_clean(self.conn)
         if etype not in ("annotation_shown", "hover", "known_click", "user_pin", "user_mastered"):
             return {"ok": False, "error": "unknown event type: " + str(etype)}
         lemma = (lemma or "").strip()
@@ -354,19 +356,16 @@ class Engine:
                 if kc_today >= 60:
                     return {"ok": False, "counted": False,
                             "error": "known_click_daily_limit", "used_today": kc_today, "limit": 60}
-            event_id = append_event(self.conn, etype, payload, idem_key=idem_key,
-                                    source=source, autocommit=False)
-            counted = event_id is not None
-            if counted:
-                folded = dict(payload)
-                folded["ts"] = now
-                folded["type"] = etype
-                folded["idem_key"] = idem_key
-                fold_event(self.states, folded, self.params, self.seen_idem)
-            try:
-                self.conn.commit()
-            except Exception:
-                pass
+            with EventBatch(self) as batch:
+                event_id = append_event(self.conn, etype, payload, idem_key=idem_key,
+                                        source=source, autocommit=False)
+                counted = event_id is not None
+                if counted:
+                    folded = dict(payload)
+                    folded["ts"] = now
+                    folded["type"] = etype
+                    folded["idem_key"] = idem_key
+                    batch.fold(event_id, folded, fold_event)
             st = self.states.get((lemma, 0))
             s = round(st.s_value(self.params), 3) if st is not None else 0.0
         # 悬停 = 最强兴趣信号 → 异步跑义项判定影子（P5 第一步：只写缓存与日志，不上屏）
@@ -387,17 +386,26 @@ class Engine:
         except Exception:
             pass
 
+    @guarded
     def refresh_params(self):
         """重新载入有效参数（提案生效后调用）。"""
         try:
             from . import params as _params_mod
             self.params = _params_mod.effective(self.conn)
         except Exception:
-            pass
+            health.require_clean(self.conn)
         self._params_ts = time.time()
         return self.params
 
+    @guarded
+    def check_health(self):
+        health.require_clean(self.conn)
+        self.conn.execute("SELECT 1").fetchone()
+        return {"ok": True}
+
+    @guarded
     def status(self):
+        health.require_clean(self.conn)
         with self.lock:
             rows = self.conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
             events = int(rows["n"]) if rows else 0

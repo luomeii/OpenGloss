@@ -4,7 +4,11 @@
 上下文策略（用户 2026-10-01 拍板）：1M 上下文很充裕 → **默认全量装载**，
 只在超过单请求上限时按固定顺序渐进裁剪（先丢最老的对话 → 再丢低置信记忆 → 最后丢低 S 的词）。
 """
+from . import health
+from .db_access import access, guarded
+from .read_snapshot import ReadSnapshot
 import json
+from .paths import config_path
 import time
 from pathlib import Path
 
@@ -16,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _config() -> dict:
     try:
-        return json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+        return json.loads(config_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -29,6 +33,7 @@ def estimate_tokens(obj) -> int:
         return 1
 
 
+@guarded
 def band_words(engine, n=40, order="recent"):
     """学习带内（含带下新词）的词，附释义。
 
@@ -63,6 +68,7 @@ def band_words(engine, n=40, order="recent"):
     return items[:n]
 
 
+@guarded
 def word(engine, lemma: str):
     lemma = (lemma or "").strip().lower()
     if not lemma:
@@ -85,6 +91,7 @@ def word(engine, lemma: str):
     }
 
 
+@guarded
 def events(engine, params: dict):
     days = int(params.get("days") or 7)
     since = int(time.time()) - days * 86400
@@ -108,6 +115,7 @@ def events(engine, params: dict):
     return out
 
 
+@guarded
 def decisions(engine, params: dict):
     """决策/调用审计：哪个 actor 动了哪项能力。"""
     n = int(params.get("n") or 20)
@@ -122,6 +130,7 @@ def decisions(engine, params: dict):
             for t, a, c, o, d in engine.conn.execute(sql, args)]
 
 
+@guarded
 def trend(engine, days=7):
     """按天的遭遇/新词/曝光曲线（趋势可读）。"""
     since = int(time.time()) - days * 86400
@@ -150,6 +159,7 @@ def trend(engine, days=7):
     return {"days": days, "series": series}
 
 
+@guarded
 def page(engine, params: dict):
     """页面现场：优先用调用方给的；否则取最近一次曝光上报的页面。"""
     if params.get("url") or params.get("annotated"):
@@ -179,8 +189,11 @@ def page(engine, params: dict):
     }
 
 
-def assemble(engine, params: dict):
+@guarded
+def _assemble_snapshot(engine, params: dict, reader=None):
     """L0–L6 完整装配（1M 策略：默认全量）。"""
+    if reader is not None:
+        reader.check_source()
     cfg = _config()
     include = params.get("include") or ["persona", "learner", "words", "metrics", "page", "limits", "self", "memory"]
     top_n = int(params.get("top_n") or 40)
@@ -200,12 +213,6 @@ def assemble(engine, params: dict):
         }
     if "words" in include:
         ctx["words"] = band_words(engine, top_n)
-    if "metrics" in include:
-        ctx["metrics"] = metrics_mod.compute(engine.conn, days=days)
-        try:
-            ctx["outcomes"] = metrics_mod.compute_outcomes(engine.conn)
-        except Exception:
-            ctx["outcomes"] = None
     if "page" in include:
         ctx["page"] = page(engine, params.get("page") or {})
     if "self" in include:
@@ -257,6 +264,34 @@ def assemble(engine, params: dict):
             "source": "effective_params",
         }
 
+    if reader is not None:
+        reader.pin()
+    return ctx, cfg, days
+
+
+def assemble(engine, params: dict):
+    """Snapshot shared state first; trim the detached context outside its guard."""
+    wants_metrics = not params.get("include") or "metrics" in params["include"]
+    reader = ReadSnapshot(engine.conn) if wants_metrics else None
+    pending_metrics = pending_outcomes = None
+    try:
+        ctx, cfg, days = _assemble_snapshot(engine, params, reader)
+        if reader is not None:
+            pending_metrics = metrics_mod._metric_inputs(reader.conn, days)
+            try:
+                pending_outcomes = metrics_mod._outcome_inputs(reader.conn)
+            except Exception:
+                pass
+    finally:
+        if reader is not None:
+            reader.close()
+    if pending_metrics is not None:
+        ctx["metrics"] = metrics_mod._compute_from_inputs(pending_metrics, days)
+        try:
+            ctx["outcomes"] = (metrics_mod._compute_outcomes_from_inputs(pending_outcomes)
+                               if pending_outcomes is not None else None)
+        except Exception:
+            ctx["outcomes"] = None
     cap = int(params.get("max_tokens") or cfg.get("context_max_tokens", 200000))
     toks = estimate_tokens(ctx)
     trimmed = []
@@ -271,4 +306,5 @@ def assemble(engine, params: dict):
         trimmed.append("metrics.top_ignored_words")
         toks = estimate_tokens(ctx)
     ctx["budget_tokens"] = {"estimate": toks, "cap": cap, "trimmed": trimmed, "policy": "1M_full_then_trim"}
+    health.check(engine)
     return ctx

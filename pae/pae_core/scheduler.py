@@ -16,7 +16,8 @@ import os
 
 ROOT = Path(__file__).resolve().parents[1]
 # 允许独立配置文件（测试用；生产就是 pae/config.json）
-CONFIG = Path(os.environ.get("PAE_SCHEDULE_CONFIG") or (ROOT / "config.json"))
+from .paths import config_path
+CONFIG = Path(os.environ.get("PAE_SCHEDULE_CONFIG") or config_path())
 CHECK_INTERVAL_S = 60
 
 _state = {"thread": None, "stop": False, "last_check": 0, "last_result": None}

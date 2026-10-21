@@ -8,7 +8,9 @@
 - 淘汰规则：active ≤8（2026-10-03 二次反馈：5 太小，用户记的东西一多就被挤掉）；
   超出时按 (confidence × 新鲜度) 淘汰最弱一条 → 写 superseded_by（永不物理删除）。
 """
+from .db_access import access, guarded, transaction
 import json
+from .paths import config_path
 import time
 import uuid
 from pathlib import Path
@@ -24,7 +26,7 @@ MAX_TURN_TEXT = 2000
 
 def _cfg(key, default):
     try:
-        return json.loads((ROOT / "config.json").read_text(encoding="utf-8")).get(key, default)
+        return json.loads(config_path().read_text(encoding="utf-8")).get(key, default)
     except Exception:
         return default
 
@@ -35,6 +37,7 @@ def _now():
 
 # ---------- facts ----------
 
+@guarded
 def active_facts(conn, limit=None):
     sql = ("SELECT fact_id, kind, text, source_actor, evidence, confidence, created_at, expires_at"
            " FROM facts WHERE superseded_by IS NULL")
@@ -54,7 +57,8 @@ def active_facts(conn, limit=None):
     return out
 
 
-def _evict_if_needed(conn):
+@guarded
+def _evict_if_needed(conn, *, autocommit=True):
     limit = int(_cfg("facts_max_active", MAX_ACTIVE))
     act = active_facts(conn)
     if len(act) <= limit:
@@ -72,10 +76,12 @@ def _evict_if_needed(conn):
     weakest = sorted(pool, key=score)[0]
     conn.execute("UPDATE facts SET superseded_by = ? WHERE fact_id = ?",
                  ("evicted_by_quota", weakest["fact_id"]))
-    conn.commit()
+    if autocommit:
+        conn.commit()
     return weakest["fact_id"]
 
 
+@guarded
 def remember(conn, actor, kind, text, evidence, confidence=0.7, ttl_days=None):
     """写一条长期记忆。返回 (ok, body)。守卫不过直接拒。"""
     kind = (kind or "").strip()
@@ -96,16 +102,17 @@ def remember(conn, actor, kind, text, evidence, confidence=0.7, ttl_days=None):
     conf = min(1.0, max(0.0, conf))
     fid = "fact_" + uuid.uuid4().hex[:16]
     exp = (_now() + int(ttl_days) * 86400) if ttl_days else None
-    conn.execute(
-        "INSERT INTO facts(fact_id, kind, text, source_actor, evidence, confidence, created_at, expires_at)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        (fid, kind, text, actor, json.dumps(evidence, ensure_ascii=False), conf, _now(), exp),
-    )
-    conn.commit()
-    evicted = _evict_if_needed(conn)
+    with transaction(conn):
+        conn.execute(
+            "INSERT INTO facts(fact_id, kind, text, source_actor, evidence, confidence, created_at, expires_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (fid, kind, text, actor, json.dumps(evidence, ensure_ascii=False), conf, _now(), exp),
+        )
+        evicted = _evict_if_needed(conn, autocommit=False)
     return True, {"fact_id": fid, "kind": kind, "evicted": evicted}
 
 
+@guarded
 def forget(conn, actor, fact_id):
     """撤销一条记忆：不物理删除，只标记被谁取代。**AI 不能抹掉用户写的事实**。"""
     row = conn.execute("SELECT fact_id, superseded_by, source_actor FROM facts WHERE fact_id = ?",
@@ -123,6 +130,7 @@ def forget(conn, actor, fact_id):
     return True, {"fact_id": fact_id, "changed": True}
 
 
+@guarded
 def search(conn, query, k=5, kind=None):
     q = ("%" + (query or "").strip() + "%")
     sql = ("SELECT fact_id, kind, text, source_actor, evidence, confidence, created_at"
@@ -146,15 +154,18 @@ def search(conn, query, k=5, kind=None):
 
 # ---------- sessions ----------
 
-def session_open(conn, actor="companion"):
+@guarded
+def session_open(conn, actor="companion", *, autocommit=True):
     sid = "sess_" + uuid.uuid4().hex[:16]
     conn.execute("INSERT INTO chat_sessions(session_id, actor, started_at, turn_count) VALUES(?,?,?,0)",
                  (sid, actor, _now()))
-    conn.commit()
+    if autocommit:
+        conn.commit()
     return {"session_id": sid, "actor": actor, "started_at": _now()}
 
 
-def session_turn(conn, session_id, role, text, refs=None):
+@guarded
+def session_turn(conn, session_id, role, text, refs=None, *, autocommit=True):
     role = (role or "").strip()
     if role not in ROLES:
         return False, {"error": "bad_role", "allowed": list(ROLES)}
@@ -170,10 +181,12 @@ def session_turn(conn, session_id, role, text, refs=None):
     conn.execute("INSERT INTO chat_turns(turn_id, session_id, role, text, ts, refs) VALUES(?,?,?,?,?,?)",
                  (tid, session_id, role, text, _now(), json.dumps(refs or [], ensure_ascii=False)))
     conn.execute("UPDATE chat_sessions SET turn_count = turn_count + 1 WHERE session_id = ?", (session_id,))
-    conn.commit()
+    if autocommit:
+        conn.commit()
     return True, {"turn_id": tid, "session_id": session_id}
 
 
+@guarded
 def session_close(conn, session_id, summary=None):
     row = conn.execute("SELECT session_id FROM chat_sessions WHERE session_id = ?", (session_id,)).fetchone()
     if not row:
@@ -184,6 +197,7 @@ def session_close(conn, session_id, summary=None):
     return True, {"session_id": session_id, "closed": True}
 
 
+@guarded
 def recent(conn, session_id=None, n=10):
     """最近的对话轮次（关引擎重开仍可取回——这就是「长久记忆」的最小证据）。"""
     sql = ("SELECT t.turn_id, t.session_id, t.role, t.text, t.ts"

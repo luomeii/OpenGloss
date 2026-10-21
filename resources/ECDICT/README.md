@@ -16,8 +16,8 @@
    `dict_words = 770,611` 就是它构建出来的，**请优先用这个**）。最省事的方式是浅克隆：
 
    ```bash
-   git clone --depth 1 https://github.com/skywind3000/ECDICT /tmp/ecdict
-   cp /tmp/ecdict/ecdict.csv resources/ECDICT/
+   git clone --depth 1 https://github.com/skywind3000/ECDICT ../ecdict-source
+   cp ../ecdict-source/ecdict.csv resources/ECDICT/
    ```
 
    或在浏览器里打开该仓库 → 点 `ecdict.csv` → 右上角 Download raw file。
