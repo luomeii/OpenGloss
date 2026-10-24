@@ -10,6 +10,7 @@
   扩展上报 page_active_ms（页面活跃时长）≥ QUALIFIED_PAGE_MS 的曝光算合格。
   真正的「元素级视口停留」留待后续升级；此处如实标注 rule 版本与口径。
 """
+from .privacy import page_identity_resolver
 from .db_access import access, guarded, batched_rows
 import json
 import time
@@ -63,6 +64,7 @@ def _exposure_stats(conn, window_days=WINDOW_DAYS):
     """按词统计曝光/悬停/点击/首次出现（全部来自已有事件）。"""
     since = int(time.time()) - int(window_days) * 86400
     stats = {}
+    resolve_page = page_identity_resolver()
     with batched_rows(conn,
             "SELECT ts, type, payload FROM events WHERE type IN ('annotation_shown','hover','known_click')") as rows:
         for ts, etype, payload in rows:
@@ -82,7 +84,7 @@ def _exposure_stats(conn, window_days=WINDOW_DAYS):
                     vms = p.get("page_active_ms")
                     # 降级口径：没报 page_active_ms 的旧数据按「视为合格」处理（避免把历史数据全判为不合格）
                     if vms is None or int(vms) >= QUALIFIED_PAGE_MS:
-                        page = p.get("page_id") or ""
+                        page = resolve_page(p)
                         bucket = (page, ts // 3600)
                         if bucket not in s["exp_buckets"]:
                             s["exp_buckets"].add(bucket)
@@ -102,6 +104,8 @@ def _exposure_stats(conn, window_days=WINDOW_DAYS):
 @guarded
 def _overrides(conn):
     out = {}
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='familiarity_override'").fetchone():
+        return out
     for lemma, action, ts, source in conn.execute(
             "SELECT lemma, action, ts, source FROM familiarity_override"):
         out[lemma] = {"action": action, "ts": ts, "source": source}
@@ -196,3 +200,17 @@ def restore(conn, lemma, actor="user"):
                  (lemma, "revoke", int(time.time()), actor))
     conn.commit()
     return {"lemma": lemma, "restored": True, "cooldown_days": R7_REVOKE_COOLDOWN_S // 86400}
+
+@guarded
+def read_report(conn, engine_params, states, limit=20):
+    """Detached projection: never create tables or recompute persisted state."""
+    values = evaluate(conn, engine_params, states)
+    rows = sorted(values.items(), key=lambda item: (item[1]["state"] != "exempt", -item[1]["q_exp"]))[:limit]
+    return {"rule_version": RULE_VERSION, "qualified_page_ms": QUALIFIED_PAGE_MS,
+            "window_days": WINDOW_DAYS, "min_exposures": R1_MIN_EXPOSURES, "min_days": R2_MIN_DAYS,
+            "would_exempt": [{"lemma": lemma, "q_exp": value["q_exp"], "days": value["distinct_days"], "reason": value["reason_code"]}
+                             for lemma, value in rows if value["state"] == "exempt"],
+            "near_miss": [{"lemma": lemma, "q_exp": value["q_exp"], "days": value["distinct_days"], "blocked_by": value["reason_code"]}
+                          for lemma, value in rows if value["state"] != "exempt"][:10],
+            "note": "只读即时投影；recompute=true 需write scope，才刷新持久投影。"}
+

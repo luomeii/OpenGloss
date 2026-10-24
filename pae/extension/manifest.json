@@ -1,15 +1,46 @@
 {
   "manifest_version": 3,
   "name": "OpenGloss",
-  "version": "0.3.0",
+  "version": "0.5.0.1",
   "description": "读英文网页时自动标注生词，词汇在阅读里自然积累（本地优先，零遥测）",
-  "permissions": ["storage", "scripting"],
-  "action": { "default_popup": "popup.html" },
-  "host_permissions": ["http://127.0.0.1:4815/*", "<all_urls>"],
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["content.js"],
-    "run_at": "document_idle"
-  }],
-  "background": { "service_worker": "sw.js" }
+  "permissions": [
+    "storage",
+    "scripting",
+    "alarms"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "http://127.0.0.1:4815/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "version_name": "0.5.0-rc.1",
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "resources": [
+        "companion.html"
+      ]
+    }
+  ]
 }

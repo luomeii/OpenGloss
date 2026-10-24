@@ -4,12 +4,19 @@
 内置 companion 与外部智能体走同一入口，谁都没有内部捷径（防两条路径漂移）。
 """
 from . import health
+from . import privacy, quota
+from .http_security import config_projection
 from .db_access import access, guarded, transaction
 import json
 import time
 from pathlib import Path
 
 from . import keys as keys_mod
+
+
+class GenericEventDenied(Exception):
+    """Generic event authorization refusal, distinct from OS permission errors."""
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "capabilities.json"
@@ -115,17 +122,20 @@ def _remember_turns(conn, user_text: str, agent_text: str):
         row = conn.execute("SELECT session_id FROM chat_sessions WHERE actor='companion'"
                            " AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1").fetchone()
         sid = row[0] if row else mem_mod.session_open(conn, "companion", autocommit=False)["session_id"]
+        ids = {}
         for role, text in turns:
             if not text:
                 continue
-            last = conn.execute("SELECT role, text FROM chat_turns WHERE session_id=?"
+            last = conn.execute("SELECT turn_id, role, text FROM chat_turns WHERE session_id=?"
                                 " ORDER BY ts DESC, rowid DESC LIMIT 1", (sid,)).fetchone()
-            if last and last[0] == role and last[1] == text:
+            if last and last[1] == role and last[2] == text:
+                ids[role] = last[0]
                 continue
             ok, body = mem_mod.session_turn(conn, sid, role, text, autocommit=False)
             if not ok:
                 raise ValueError(json.dumps(body, ensure_ascii=False))
-    return sid
+            ids[role] = body["turn_id"]
+    return {"session_id": sid, "user_turn_id": ids.get("user"), "agent_turn_id": ids.get("agent")}
 
 
 def _extract_remember_intent(text):
@@ -184,7 +194,7 @@ def _extract_remember_intent(text):
     return None
 
 
-def _dispatch(name: str, params: dict, actor: str = "local"):
+def _dispatch(name: str, params: dict, actor: str = "local", scopes=()):
     from .engine import get_engine
     from . import llm as llm_mod
     from . import persona as persona_mod
@@ -193,16 +203,18 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         return get_engine().check_health()
     if name == "pae.annotate":
         return get_engine().annotate(params.get("text", ""), params.get("page_id") or "default",
-                                     params.get("session_id"))
+                                     params.get("session_id"), max_annotations=params.get("max_annotations"))
     if name == "pae.status":
         return get_engine().status()
     if name == "pae.config":
-        return _config()
+        return config_projection(_config())
     if name == "pae.event":
-        metas = {k: params.get(k) for k in ("page_id", "session_id", "s_value", "page_active_ms")
+        if actor not in ("local", "user") and params.get("type") not in ("annotation_shown", "hover"):
+            raise GenericEventDenied("generic_event_requires_trusted_user; use pae.pin for mastery")
+        metas = {k: params.get(k) for k in ("page_id", "session_id", "s_value", "page_active_ms", "sentence")
                  if params.get(k) is not None}
         return get_engine().record_event(params.get("type"), params.get("lemma"),
-                                         params.get("surface") or "", metas)
+                                         params.get("surface") or "", metas, source=actor)
     if name == "pae.context":
         from . import observe as obs_mod
         return obs_mod.assemble(get_engine(), params or {})
@@ -236,7 +248,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         if name == "pae.memory.recent":
             return mem_mod.recent(conn, params.get("session_id"), int(params.get("n") or 10))
         if name == "pae.remember":
-            ok, body = mem_mod.remember(conn, params.get("actor") or "companion",
+            ok, body = mem_mod.remember(conn, actor,
                                         params.get("kind"), params.get("text"),
                                         params.get("evidence"), params.get("confidence", 0.7),
                                         params.get("ttl_days"))
@@ -244,12 +256,12 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                 raise ValueError(json.dumps(body, ensure_ascii=False))
             return body
         if name == "pae.forget":
-            ok, body = mem_mod.forget(conn, params.get("actor") or "companion", params.get("fact_id"))
+            ok, body = mem_mod.forget(conn, actor, params.get("fact_id"))
             if not ok:
                 raise ValueError(json.dumps(body, ensure_ascii=False))
             return body
         if name == "pae.session.open":
-            return mem_mod.session_open(conn, params.get("actor") or "companion")
+            return mem_mod.session_open(conn, actor)
         if name == "pae.session.turn":
             ok, body = mem_mod.session_turn(conn, params.get("session_id"), params.get("role"),
                                             params.get("text"), params.get("refs"))
@@ -262,7 +274,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             from . import params as params_mod
             from . import push as push_mod
             eng = get_engine()
-            ok, body = params_mod.propose(eng.conn, params.get("actor") or actor,
+            ok, body = params_mod.propose(eng.conn, actor,
                                           params.get("patch"), params.get("rationale", ""),
                                           params.get("evidence"), params.get("ttl_days"))
             if not ok:
@@ -270,7 +282,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             eng.refresh_params()
             push_mod.notify(eng.conn, "param_changed",
                             {"decision_id": body.get("decision_id"), "after": body.get("applied_keys")},
-                            actor=params.get("actor") or "companion")
+                            actor=actor)
             return body
     if name == "pae.decisions":
         from . import params as params_mod
@@ -280,7 +292,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         with access(get_engine().conn):
             import time as _t
             eng = get_engine()
-            actor_pin = params.get("actor") or actor
+            actor_pin = actor
             # 配额：防批量「标记认识了」把注解静默关掉（AI 每天 ≤20）
             day_start = int(_t.time()) // 86400 * 86400
             used = eng.conn.execute(
@@ -297,14 +309,14 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                                    source=actor_pin)
     if name == "pae.say":
         from . import push as push_mod
-        ok, body = push_mod.say(get_engine().conn, params.get("actor") or actor,
+        ok, body = push_mod.say(get_engine().conn, actor,
                                 params.get("text"), params.get("anchor") or "")
         if not ok:
             raise ValueError(json.dumps(body, ensure_ascii=False))
         return body
     if name == "pae.hint":
         from . import push as push_mod
-        ok, body = push_mod.hint(get_engine().conn, params.get("actor") or "companion",
+        ok, body = push_mod.hint(get_engine().conn, actor,
                                  params.get("lemma") or "", params.get("level") or "up")
         if not ok:
             raise ValueError(json.dumps(body, ensure_ascii=False))
@@ -343,19 +355,19 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         return {"ok": True, "config": cfg}
     if name == "pae.agent.tick":
         from . import agent as agent_mod
-        return agent_mod.tick(get_engine().conn, params.get("actor") or "companion",
+        return agent_mod.tick(get_engine().conn, actor,
                               params.get("stimulus") or "")
     if name == "pae.agent.log":
         from . import agent as agent_mod
         return agent_mod.log(get_engine().conn, int(params.get("n") or 20))
     if name == "pae.key.issue":
-        if actor not in ("user", "local"):
+        if actor not in ("user", "local") and "admin" not in scopes:
             raise ValueError(json.dumps({"error": "forbidden",
                                          "detail": "只有用户能签发外部 key"}, ensure_ascii=False))
         who = params.get("name") or "ext:unnamed"
         plain = get_engine().conn.health.publish(keys_mod.issue, who)
         return {"actor": who, "key": plain,
-                "note": "明文只显示这一次；外部智能体用它作 X-PAE-Key"}
+                "note": "明文只显示这一次；外部智能体用它作 scoped Bearer（可带同值 X-PAE-Key）"}
     if name == "pae.permissions":
         from . import agent as agent_mod
         from . import params as params_mod
@@ -370,7 +382,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             "actors": {"local": "本机用户（面板/扩展），最高写权，不受限",
                        "companion": "内置角色（进程内，走同一套门/配额/审计）",
                        "analyst": "分析角色（同上）",
-                       "ext:<name>": "外部智能体（需 X-PAE-Key）"},
+                       "ext:<name>": "外部智能体（需 scoped Bearer）"},
             "observe": "全部只读能力对任何 actor 开放（它要看得见才能判断）",
             "act_limits": {
                 "propose.normal_knobs": {"ttl": "AI 必填", "cooldown": "同键 1 天"},
@@ -399,7 +411,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         with access(get_engine().conn):
             from . import params as params_mod
             conn = get_engine().conn
-            eff = params_mod.effective(conn)
+            eff = params_mod.effective(conn, readonly=True)
             return {
                 "overrides": params_mod.current_overrides(conn),
                 "effective": {k: eff.get(k) for k in params_mod.TUNABLE},
@@ -430,10 +442,10 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         with access(get_engine().conn):
             from . import familiarity as fam_mod
             eng = get_engine()
-            if params.get("recompute", True):
+            if params.get("recompute", False):
                 fam_mod.recompute(eng.conn, eng.params, eng.states)
             mode = _fam_mode()
-            rep = fam_mod.shadow_report(eng.conn, int(params.get("limit") or 20))
+            rep = fam_mod.read_report(eng.conn, eng.params, eng.states, int(params.get("limit") or 20))
             rep["mode"] = mode
             rep["enforce_active"] = (mode == "enforce")
             return rep
@@ -441,14 +453,14 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         with access(get_engine().conn):
             from . import familiarity as fam_mod
             eng = get_engine()
-            out = fam_mod.restore(eng.conn, params.get("lemma") or "", params.get("actor") or actor)
+            out = fam_mod.restore(eng.conn, params.get("lemma") or "", actor)
             fam_mod.recompute(eng.conn, eng.params, eng.states)
             return out
     if name == "pae.outcomes":
         from . import metrics as metrics_mod
         eng = get_engine()
         out = metrics_mod.compute_outcomes(eng.conn, int(params.get("eval_days") or 7))
-        if params.get("evaluate_decisions", True):
+        if params.get("evaluate_decisions", False):
             out["decision_effects"] = metrics_mod.evaluate_decisions(eng.conn)
         return out
     if name == "pae.trend":
@@ -468,7 +480,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         with access(get_engine().conn):
             from . import params as params_mod
             newp = params.get("params") or {}
-            ok, issues, axes = params_mod.persona_guard(get_engine().conn, params.get("actor") or actor, newp)
+            ok, issues, axes = params_mod.persona_guard(get_engine().conn, actor, newp)
             if not ok:
                 raise ValueError(json.dumps({"error": "persona_guard", "issues": issues}, ensure_ascii=False))
             ok2, issues2, path = get_engine().conn.health.publish(persona_mod.save_params, newp)
@@ -480,7 +492,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                 "INSERT INTO decisions(decision_id, ts, actor, capability, patch, rationale, evidence,"
                 " before, after, applied, gate_result) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
                 ("dec_" + __import__("uuid").uuid4().hex[:16], int(time.time()),
-                 params.get("actor") or actor, "pae.persona.update",
+                 actor, "pae.persona.update",
                  json.dumps([{"axis": k, "to": v["to"]} for k, v in axes.items()], ensure_ascii=False),
                  params.get("rationale") or "", "[]", json.dumps(axes, ensure_ascii=False),
                  json.dumps(axes, ensure_ascii=False), "persona_guard: ok"))
@@ -490,18 +502,6 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         from .memory import MAX_TURN_TEXT
         if len(str(params.get("stimulus") or "").strip()) > MAX_TURN_TEXT:
             raise ValueError(json.dumps({"error": "chat_text_too_long", "max": MAX_TURN_TEXT}))
-        # H2 配额（评审 2026-10-03）：persona.say 是真实 LLM 调用且此前**无任何日限**
-        # （有日限的是推送型 pae.say）。每轮聊天一次调用，正常重度使用一天难超 120；
-        # 恶意/失控循环（页面伪造桥消息、脚本死循环）会被这里掐断。本地 local 通道
-        # （用户自己的机器）同样受限——防线防的是失控，不是防用户。
-        day0 = int(time.time()) // 86400 * 86400
-        used_say = int(get_engine().conn.execute(
-            "SELECT COUNT(*) FROM cap_calls WHERE capability='pae.persona.say' AND ts>=? AND ok=1",
-            (day0,)).fetchone()[0])
-        if used_say >= 120:
-            raise ValueError(json.dumps(
-                {"error": "persona_say_daily_limit", "used_today": used_say, "limit": 120,
-                 "hint": "每轮聊天都是真实 LLM 花费；明天自动重置"}, ensure_ascii=False))
         p = params.get("params") or persona_mod.load_params()
         cb = (params.get("context_block") or "").strip()
         c = None
@@ -576,7 +576,15 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             temp = 0.7
         msgs = [{"role": "system", "content": sysp}] + history + [{"role": "user", "content": stimulus}]
         t0 = time.time()
-        r = llm_mod.chat(msgs, temperature=temp, timeout=90)
+        attempt = quota.reserve(get_engine().conn, "pae.persona.say", 120)
+        if attempt is None:
+            raise quota.LimitExceeded("pae.persona.say", 120)
+        try:
+            r = llm_mod.chat(msgs, temperature=temp, timeout=90)
+        except Exception:
+            quota.finish(get_engine().conn, attempt, "failed")
+            raise
+        quota.finish(get_engine().conn, attempt, "response")
         reply = (r.get("content") or "").strip()
         if len(reply) > MAX_TURN_TEXT:
             raise ValueError(json.dumps({"error": "chat_reply_too_long", "max": MAX_TURN_TEXT}))
@@ -617,13 +625,13 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                 if intent_txt:
                     day0 = int(time.time()) // 86400 * 86400
                     used_today = int(get_engine().conn.execute(
-                        "SELECT COUNT(*) FROM facts WHERE source_actor='user' AND created_at >= ?",
-                        (day0,)).fetchone()[0])
+                        "SELECT COUNT(*) FROM facts WHERE source_actor=? AND created_at >= ?",
+                        (actor, day0)).fetchone()[0])
                     if used_today >= 30:
                         remembered = {"ok": False, "skipped": "daily_intent_limit", "used_today": used_today}
                     else:
                         from . import memory as _mem
-                        okf, fbody = _mem.remember(get_engine().conn, "user", "preference",
+                        okf, fbody = _mem.remember(get_engine().conn, actor, "preference",
                                                    intent_txt[:200],
                                                    [{"via": "chat_intent", "stimulus": stimulus[:300]}],
                                                    confidence=0.9)
@@ -633,28 +641,34 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             if not reply:
                 reply = "记下了。"
             # 说出的话必须落库，否则「下一轮记得上一轮」没有数据源（见 _remember_turns 的说明）
-            _remember_turns(get_engine().conn, stimulus, reply)
-            return {"reply": reply, "elapsed_ms": int((time.time() - t0) * 1000),
+            turn_ids = _remember_turns(get_engine().conn, stimulus, reply)
+            return {**turn_ids, "reply": reply, "elapsed_ms": int((time.time() - t0) * 1000),
                     "model": r.get("model"), "usage": r.get("usage"),
                     "history_turns": len(history), "remembered": remembered}
     return None
 
 
-def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
+# The HTTP GET boundary uses this positive allowlist. Effectful capabilities
+# require POST and their existing explicit write-scope guards below.
+HTTP_READ_CAPS = frozenset({"pae.health", "pae.status", "pae.config", "pae.persona", "pae.persona.preview",
+                           "pae.word", "pae.trend", "pae.grammar", "pae.events", "pae.decisions", "pae.page",
+                           "pae.metrics", "pae.memory.search", "pae.memory.recent", "pae.push.log", "pae.agent.log",
+                           "pae.audit", "pae.permissions", "pae.agent.schedule"})
+
+
+def handle(name: str, params: dict, key: str = "", actor_hint: str = None, *, authenticated_identity=None):
     """统一入口。返回 (http_status, body)。
 
     actor_hint：**仅**给进程内置角色（companion/analyst）用。它省掉的只是「key→actor 解析」这一步，
     后面的 scope 检查、守门、配额、审计**一个都不少**——这是有意的接缝，写在 36 号文档里。
     """
-    if actor_hint:
-        actor, scopes = actor_hint, ["read", "write"]
+    params = params or {}
+    if authenticated_identity is not None:
+        actor, scopes = authenticated_identity
+    elif actor_hint:
+        actor, scopes = actor_hint, (["read", "write", "admin"] if actor_hint in ("local", "user") else ["read", "write"])
     else:
         actor, scopes = keys_mod.resolve(key)
-    # 安全：**身份只能来自认证**。params 里的 actor 仅在「无 key 的本机通道」生效
-    # （那是用户自己的机器，用它模拟某个 actor 做测试/触发是合理的）；
-    # 一旦带了 key（外部智能体），params 里的 actor 一律忽略，否则可以自称 user 提权。
-    if actor == "local" and isinstance(params, dict) and params.get("actor"):
-        actor = str(params["actor"])
     if actor is None:
         audit("unknown", name, False, "unauthorized")  # 被拒也要留痕：能看见谁试过什么
         return 401, {"ok": False, "error": "unauthorized", "detail": "unknown X-PAE-Key"}
@@ -668,7 +682,10 @@ def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
         return 501, {"ok": False, "error": "not_implemented", "name": name,
                      "status": cap.get("status"),
                      "note": "能力已在清单中登记，但实现未完成——见 /v1/cap/manifest 的 summary"}
-    need = cap.get("scope") or "read"
+    explicit_write = (name == "pae.annotate"
+                      or (name == "pae.familiarity" and params.get("recompute", False))
+                      or (name == "pae.outcomes" and params.get("evaluate_decisions", False)))
+    need = "write" if explicit_write else (cap.get("scope") or "read")
     if need not in (scopes or []):
         audit(actor, name, False, "scope_denied")
         return 403, {"ok": False, "error": "scope_denied", "need": need, "have": scopes}
@@ -677,9 +694,15 @@ def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
     try:
         if not stopping:
             get_engine().check_health()
-        result = _dispatch(name, params or {}, actor)
+        result = _dispatch(name, params or {}, actor, scopes)
         if not stopping:
             get_engine().check_health()
+    except GenericEventDenied:
+        audit(actor, name, False, "generic_event_requires_trusted_user")
+        return 403, {"ok": False, "error": "generic_event_requires_trusted_user", "hint": "use pae.pin for mastery"}
+    except quota.LimitExceeded as e:
+        audit(actor, name, False, "model_attempt_daily_limit")
+        return 429, {"ok": False, **e.payload}
     except health.EngineUnavailable as e:
         audit(actor, name, False, str(e))
         return 503, {"ok": False, "error": "engine_unavailable", "detail": str(e)}
@@ -688,3 +711,4 @@ def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
         return 500, {"ok": False, "error": "%s: %s" % (type(e).__name__, str(e)[:200])}
     audit(actor, name, True, "")
     return 200, {"ok": True, "actor": actor, "capability": name, "result": result}
+

@@ -114,11 +114,12 @@ def revert_expired(conn):
 
 
 @guarded
-def effective(conn):
+def effective(conn, *, readonly=False):
     """DEFAULTS 加运行时覆盖（顺带回滚到期项）。"""
-    revert_expired(conn)
+    if not readonly:
+        revert_expired(conn)
     p = dict(DEFAULTS_ALL)
-    for key, value in conn.execute("SELECT key, value FROM params"):
+    for key, value in conn.execute("SELECT key, value FROM params WHERE expires_at IS NULL OR expires_at > ?", (_now(),)):
         try:
             p[key] = json.loads(value)
         except Exception:

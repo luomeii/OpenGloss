@@ -3,12 +3,15 @@
 
 这是「换大脑」的唯一接缝：内置 companion、你的 LLM、外部智能体，都从这一层走。
 配置解析优先级：环境变量（PAE_LLM_BASE/KEY/MODEL） > config.json llm 段 > 内置缺省。
-API key 只从环境变量或本机 config.json 读取——config.json 里的 key 值已被 .gitignore
-防泄漏的惯例约束：请勿把真实 key 写进仓库内文件，用环境变量或本地未跟踪文件。
+API key 从环境变量或当前运行配置读取。Git 不能按 JSON 字段忽略内容；
+真实 key 只放个人运行配置或环境变量，不要写进待发布源码。
 """
 import json
 import os
 import urllib.request
+import urllib.error
+import ssl
+import certifi
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,13 +54,25 @@ def chat(messages, temperature=0.7, timeout=90, max_tokens=None, thinking=None):
         payload["thinking"] = {"type": "enabled"}
     elif mode is False or mode == "disabled":
         payload["thinking"] = {"type": "disabled"}
-    req = urllib.request.Request(
-        p["base"].rstrip("/") + "/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": "Bearer " + p["key"]},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        j = json.loads(r.read().decode("utf-8"))
+    try:
+        req = urllib.request.Request(
+            p["base"].rstrip("/") + "/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + p["key"]},
+        )
+        context = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as r:
+            j = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise RuntimeError("model_http_error") from None
+    except ssl.SSLError:
+        raise RuntimeError("model_tls_error") from None
+    except urllib.error.URLError as exc:
+        kind = "model_tls_error" if isinstance(exc.reason, ssl.SSLError) else "model_connection_error"
+        raise RuntimeError(kind) from None
+    except (OSError, ValueError, TypeError):
+        raise RuntimeError("model_response_or_connection_error") from None
     msg = (j.get("choices") or [{}])[0].get("message") or {}
     return {
         "content": (msg.get("content") or "").strip(),
@@ -65,3 +80,4 @@ def chat(messages, temperature=0.7, timeout=90, max_tokens=None, thinking=None):
         "usage": j.get("usage") or {},
         "model": j.get("model"),
     }
+

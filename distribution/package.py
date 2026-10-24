@@ -7,6 +7,8 @@ ASSET='OpenGloss-windows-x64.zip'
 API='https://api.github.com/repos/luomeii/OpenGloss/releases/latest'
 MAX_BYTES=512*1024*1024
 MANIFEST='RELEASE-MANIFEST.json'
+PUBLIC_CA='runtime/site-packages/certifi/cacert.pem'
+PUBLIC_CA_SHA256='d87887200c9a705dccc937b9b83b5e67e47024c4a4b7f9dd15700c72e0f55453'
 
 def version_key(value):
     match=re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-rc\.(0|[1-9]\d*))?',str(value))
@@ -24,11 +26,11 @@ def safe_path(name):
 
 def payload_path(name):
     path=safe_path(name)
-    if path.parts[0] not in ('runtime','app','distribution') and name not in ('Install.cmd','README-INSTALL.md','THIRD-PARTY.json'):raise ValueError('Unrecognized payload root')
+    if path.parts[0] not in ('runtime','app','distribution') and name not in ('Install.cmd','Recover.cmd','README-INSTALL.md','THIRD-PARTY.json'):raise ValueError('Unrecognized payload root')
     low=name.lower();basename=path.name.lower()
     if any(p.lower() in ('.git','__pycache__','data','logs','backups') for p in path.parts):raise ValueError('Runtime data in package')
     if basename in ('.env','keys.json','instance.json','active.json') or basename.startswith('.env.'):raise ValueError('Private configuration in package')
-    if path.suffix.lower() in ('.db','.sqlite','.sqlite3','.log','.pyc','.pem','.pfx','.p12') and low!='app/resources/ecdict/dict.sqlite':raise ValueError('Runtime or private file in package')
+    if path.suffix.lower() in ('.db','.sqlite','.sqlite3','.log','.pyc','.pem','.pfx','.p12','.key') and low not in ('app/resources/ecdict/dict.sqlite',PUBLIC_CA):raise ValueError('Runtime or private file in package')
     return path
 
 def read_json(path):return json.loads(Path(path).read_text(encoding='utf-8'))
@@ -58,6 +60,7 @@ def check_manifest(document):
     if size>MAX_BYTES:raise ValueError('Package too large')
     required={'runtime/python.exe','runtime/pythonw.exe','distribution/bootstrap.py','app/pae/config.json','app/pae/persona/default.json'}
     if not required.issubset(files):raise ValueError('Incomplete runtime package')
+    if version_key(document['version'])[:3]>=(0,5,0) and (PUBLIC_CA not in files or files[PUBLIC_CA]['sha256']!=PUBLIC_CA_SHA256):raise ValueError('Public CA bundle missing or altered')
     return document
 
 def verify_directory(folder):
@@ -108,6 +111,7 @@ def installation(root):
     return marker
 
 def active_version(root):
+    if (Path(root)/'uninstall-in-progress.json').exists():raise ValueError('Uninstall pending; use its saved Continue-uninstall.cmd entry')
     installation(root);version=read_json(Path(root)/'active.json')['version'];version_key(version);return version
 
 def stage(source,root):
@@ -151,10 +155,10 @@ def snapshot_data(root):
 
 def _snapshot_data(root):
     root=Path(root);data=root/'data';backup=data/'backups'/uuid.uuid4().hex;backup.mkdir(parents=True)
-    presence={name:(data/name).exists() for name in ('pae.db','config.json','persona.json','keys.json')}
+    presence={name:(data/name).exists() for name in ('pae.db','config.json','persona.json','keys.json','http-auth.json','privacy-key.json')}
     if presence['pae.db']:
         with contextlib.closing(sqlite3.connect(str(data/'pae.db'))) as source,contextlib.closing(sqlite3.connect(str(backup/'pae.db'))) as target:source.backup(target)
-    for name in ('config.json','persona.json','keys.json'):
+    for name in ('config.json','persona.json','keys.json','http-auth.json','privacy-key.json'):
         if presence[name]:shutil.copyfile(data/name,backup/name)
     atomic_json(backup/'snapshot.json',{'files':presence})
     return backup
@@ -170,7 +174,7 @@ def _restore_data(root,backup):
         path=data/('pae.db'+suffix)
         if path.exists():path.unlink()
     for name,present in state.items():
-        if name not in ('pae.db','config.json','persona.json','keys.json'):raise ValueError('Unknown snapshot path')
+        if name not in ('pae.db','config.json','persona.json','keys.json','http-auth.json','privacy-key.json'):raise ValueError('Unknown snapshot path')
         if present:shutil.copyfile(Path(backup)/name,data/name)
         elif (data/name).exists():(data/name).unlink()
 
@@ -226,3 +230,126 @@ def rollback(root,probe):
         restore_data(root,current_backup);atomic_json(root/'active.json',old);(root/'pending-update.json').unlink();raise
     (root/'pending-update.json').unlink()
     return {'version':previous}
+
+def export_data(root,destination):
+    root=Path(root)
+    if root.is_symlink() or root.is_junction():raise ValueError('Linked installation root refused')
+    installation(root)
+    data=root/'data';destination=Path(destination)
+    for path in (data,data/'backups',data/'exports',*(data/name for name in ('pae.db','config.json','persona.json','keys.json','http-auth.json','privacy-key.json'))):
+        if path.is_symlink() or path.is_junction():raise ValueError('Linked data path refused')
+    if destination.parent.resolve()!=(data/'exports').resolve() or destination.suffix!='.zip' or not re.fullmatch(r'[A-Za-z0-9_-]+\.zip',destination.name):raise ValueError('Invalid export destination')
+    if destination.exists():raise ValueError('Export already exists')
+    backup=snapshot_data(root)
+    names=[name for name,present in read_json(backup/'snapshot.json')['files'].items() if present]
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    try:
+        with zipfile.ZipFile(destination,'x',compression=zipfile.ZIP_DEFLATED) as archive:
+            for name in names:archive.write(backup/name,arcname=name)
+    except BaseException:
+        if destination.exists():destination.unlink()
+        raise
+    return destination
+
+def _reject_links(tree):
+    if tree.is_symlink() or tree.is_junction():raise ValueError('Linked install path refused')
+    if tree.is_dir():
+        for child in tree.iterdir():_reject_links(child)
+
+UNINSTALL_JOURNAL='uninstall-in-progress.json'
+
+def _uninstall_inventory(root):
+    """Only the original program/cache tree may be removed during a retry."""
+    files={};directories=[]
+    for name in ('versions','downloads'):
+        tree=root/name
+        if not tree.exists():continue
+        _reject_links(tree)
+        if not tree.is_dir():raise ValueError('Invalid uninstall payload tree')
+        directories.append(name)
+        for path in tree.rglob('*'):
+            relative=path.relative_to(root).as_posix()
+            if path.is_dir():directories.append(relative)
+            elif path.is_file():files[relative]=hashlib.sha256(path.read_bytes()).hexdigest()
+            else:raise ValueError('Invalid uninstall payload entry')
+    return files,sorted(directories)
+
+def _read_uninstall_journal(root,remove_data):
+    journal=read_json(root/UNINSTALL_JOURNAL)
+    if not isinstance(journal,dict) or set(journal)!={'format','product','operation_id','installation','remove_data','phase','files','directories'}:raise ValueError('Invalid uninstall journal')
+    marker=journal['installation']
+    if (journal['format']!=1 or journal['product']!=PRODUCT or
+        not isinstance(marker,dict) or marker.get('product')!=PRODUCT or
+        not re.fullmatch('[a-f0-9]{32}',str(marker.get('instance_id',''))) or
+        not re.fullmatch('[a-f0-9]{32}',str(journal['operation_id'])) or
+        type(journal['remove_data']) is not bool or journal['remove_data']!=remove_data or
+        journal['phase'] not in ('deleting','files_removed','complete')):raise ValueError('Uninstall identity or data choice mismatch')
+    if not isinstance(journal['files'],dict) or not isinstance(journal['directories'],list):raise ValueError('Invalid uninstall inventory')
+    for name in list(journal['files'])+journal['directories']:
+        if safe_path(name).parts[0] not in ('versions','downloads'):raise ValueError('Invalid uninstall boundary')
+    if any(not re.fullmatch('[a-f0-9]{64}',str(digest)) for digest in journal['files'].values()):raise ValueError('Invalid uninstall checksum')
+    if (root/'installation.json').exists():
+        if installation(root)!=marker:raise ValueError('Uninstall installation identity changed')
+    elif journal['phase'] not in ('files_removed','complete'):
+        raise ValueError('Missing installation identity during deletion')
+    return journal
+
+def preflight_uninstall(root,*,remove_data=False):
+    root=Path(root)
+    if type(remove_data) is not bool:raise ValueError('Invalid data removal choice')
+    if root.is_symlink() or root.is_junction():raise ValueError('Linked installation root refused')
+    allowed={'installation.json','active.json','manager.lock','data-owner.lock','manager-session.json','pending-update.json','versions','downloads','data',UNINSTALL_JOURNAL}
+    if any(path.name not in allowed for path in root.iterdir()):raise ValueError('Unknown installation contents')
+    for name in ('installation.json','active.json','manager-session.json','pending-update.json',UNINSTALL_JOURNAL,'manager.lock','data-owner.lock'):
+        path=root/name
+        if path.is_symlink() or path.is_junction() or (path.exists() and not path.is_file()):raise ValueError('Invalid ownership sentinel')
+    if (root/'data').is_symlink() or (root/'data').is_junction():raise ValueError('Linked data path refused')
+    if (root/UNINSTALL_JOURNAL).exists():
+        journal=_read_uninstall_journal(root,remove_data)
+        files,directories=_uninstall_inventory(root)
+        if (not set(directories).issubset(journal['directories']) or
+            any(journal['files'].get(name)!=digest for name,digest in files.items())):raise ValueError('Uninstall payload changed; foreign files preserved')
+        if journal['phase'] in ('files_removed','complete'):
+            if directories or files or (remove_data and (root/'data').exists()):raise ValueError('Unexpected files after uninstall completion')
+            if any((root/name).exists() for name in ('active.json','manager-session.json','pending-update.json')):raise ValueError('Unexpected installation metadata after cleanup')
+        if remove_data and (root/'data').exists():_reject_links(root/'data')
+        return root
+    installation(root)
+    active_version(root)
+    versions=root/'versions'
+    if not versions.is_dir():raise ValueError('Missing installed versions')
+    for version in versions.iterdir():
+        if not version.is_dir() or version.name.startswith('.'):raise ValueError('Unknown installed version')
+        verify_directory(version)
+    for name in ('versions','downloads'):
+        if (root/name).exists():_reject_links(root/name)
+    if remove_data and (root/'data').exists():_reject_links(root/'data')
+    return root
+
+def uninstall_files(root,*,remove_data=False,operation_id=None):
+    root=preflight_uninstall(root,remove_data=remove_data)
+    path=root/UNINSTALL_JOURNAL
+    if path.exists():
+        journal=_read_uninstall_journal(root,remove_data)
+        if operation_id is not None and operation_id!=journal['operation_id']:raise ValueError('Uninstall operation changed')
+    else:
+        files,directories=_uninstall_inventory(root)
+        journal={'format':1,'product':PRODUCT,'operation_id':operation_id or uuid.uuid4().hex,
+                 'installation':installation(root),'remove_data':remove_data,'phase':'deleting',
+                 'files':files,'directories':directories}
+        if not re.fullmatch('[a-f0-9]{32}',str(journal['operation_id'])):raise ValueError('Invalid uninstall operation')
+        atomic_json(path,journal)
+    if journal['phase']=='complete':return True
+    for name in ('versions','downloads'):
+        if (root/name).exists():shutil.rmtree(root/name)
+    for name in ('active.json','manager-session.json','pending-update.json'):
+        if (root/name).exists():(root/name).unlink()
+    if remove_data and (root/'data').exists():shutil.rmtree(root/'data')
+    # The durable completion stage precedes marker removal. A missing marker can
+    # only finalize an already empty payload, never authorize recursive deletion.
+    journal['phase']='files_removed';atomic_json(path,journal)
+    if (root/'installation.json').exists():(root/'installation.json').unlink()
+    journal['phase']='complete';atomic_json(path,journal)
+    # Windows cannot unlink a lock file while the helper holds its handle.
+    # Keep the privacy-free lock sentinels and journal to cover final-write crashes.
+    return True
