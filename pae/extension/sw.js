@@ -38,10 +38,39 @@ async function paeReadJson(response) {
   if (j?.ok === false || j?.result?.ok === false) { if (j.error === 'known_click_daily_limit') throw Object.assign(Error('今日认识了限额已到'),{code:'known_click_daily_limit'}); throw Error('请求被拒绝'); }
   return j;
 }
+let PAE_PAIRING = null;
+// Auto pairing: the extension asks the engine for this instance token once.
+// The engine only answers when the request carries a chrome-extension:// marker.
+async function paeAutoPair() {
+  if (PAE_TOKEN) return PAE_TOKEN;
+  if (PAE_PAIRING) return PAE_PAIRING;
+  PAE_PAIRING = (async () => {
+    const marker = 'chrome-extension://' + chrome.runtime.id;
+    const response = await fetch(PAE_BASE + '/v1/pair', {
+      method: 'GET',
+      headers: { 'X-OpenGloss-Pair': marker },
+      credentials: 'omit',
+      redirect: 'error',
+      cache: 'no-store',
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!response.ok) throw Error('HTTP ' + response.status);
+    const data = await response.json();
+    if (!data || data.ok !== true || typeof data.token !== 'string' || !data.token) throw Error('no token');
+    PAE_TOKEN = data.token.trim();
+    await new Promise(resolve => chrome.storage.local.set({ paeToken: PAE_TOKEN }, resolve));
+    if (chrome.runtime.lastError) throw Error(chrome.runtime.lastError.message);
+    return PAE_TOKEN;
+  })().finally(() => { PAE_PAIRING = null; });
+  return PAE_PAIRING;
+}
 async function paeFetch(url, init = {}) {
   await PAE_READY;
   if (PAE_SETTINGS_ERROR) throw Error(PAE_SETTINGS_ERROR);
-  if (!PAE_TOKEN) throw Error('未配对，请在扩展弹窗填写本实例配对口令');
+  if (!PAE_TOKEN) {
+    try { await paeAutoPair(); }
+    catch (error) { throw Error('自动配对失败，请在扩展弹窗填写本实例配对口令：' + error.message); }
+  }
   // Callers pass only engine-relative paths; no authenticated redirect is followed.
   if (!url.startsWith('/v1/')) throw Error('拒绝非引擎请求');
   const epoch = PAE_EPOCH;

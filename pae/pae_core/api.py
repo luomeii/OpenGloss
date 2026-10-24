@@ -1,5 +1,6 @@
 """PAE HTTP surface (FastAPI)."""
 import json
+import re
 import time
 from pathlib import Path
 
@@ -53,7 +54,7 @@ async def http_boundary(request, call_next):
     # Only the actual local pairing identity receives private instance health.
     request.state.http_authenticated = identity is not None and identity[0] == "local"
     path = request.url.path
-    if path.startswith("/v1/") and path != "/v1/health" and identity is None:
+    if path.startswith("/v1/") and path not in ("/v1/health", "/v1/pair") and identity is None:
         return JSONResponse(status_code=401, content={"ok": False, "error": "bearer_required"},
                             headers={"WWW-Authenticate": "Bearer"})
     if identity is not None and identity[0] not in ("local", "user"):
@@ -99,6 +100,37 @@ def health(resp: Response, request: Request):
     if request.state.http_authenticated:
         result["db"] = str(Path(DB_PATH).resolve())
     return result
+
+
+@app.get("/v1/pair")
+def pair(request: Request, resp: Response):
+    """One-shot auto pairing: only answers a real browser extension.
+
+    Why this endpoint exists: asking users to copy a token by hand was the
+    single biggest first-run barrier in 0.5.0 (they installed it and could
+    not use it). The extension now pairs itself on first load.
+
+    Accepted proof of being an extension (either one is enough):
+      - header X-OpenGloss-Pair: chrome-extension://<32 chars a-p>
+      - header Origin:           chrome-extension://<32 chars a-p>
+
+    Security notes:
+      - A normal web page cannot set a custom header cross-origin without a
+        CORS preflight, and this server never answers OPTIONS or sends
+        Access-Control-Allow-*, so a page cannot reach this endpoint.
+      - A local process running as the same user can already read
+        data/http-auth.json directly, so this does not lower the real bar.
+      - trusted_request still runs first: Host must be 127.0.0.1:<this port>.
+    """
+    extension_origin = re.compile(r"chrome-extension://[a-p]{32}")
+    marker = (request.headers.get("x-opengloss-pair") or "").strip()
+    origin = (request.headers.get("origin") or "").strip()
+    if not extension_origin.fullmatch(marker) and not extension_origin.fullmatch(origin):
+        resp.status_code = 403
+        resp.headers["cache-control"] = "no-store"
+        return {"ok": False, "error": "pairing_requires_extension"}
+    resp.headers["cache-control"] = "no-store"
+    return {"ok": True, "token": http_security.engine_token()}
 
 
 @app.post("/v1/annotate")
