@@ -3,6 +3,23 @@ from pathlib import Path,PurePosixPath
 import argparse,hashlib,json,shutil,sys,zipfile
 from . import package
 
+DEFAULT_VERSION='0.5.0-rc.1'
+SOURCE_BASE_COMMIT='fdd2acccb0b46969055a4867f0be7f5136998c76'
+
+def extension_version(version):
+    value=package.version_key(version)
+    if any(part>65535 for part in value[:3]) or (value[3]==0 and value[4]>=65535):raise ValueError('Extension version exceeds Chrome limits')
+    # Reserve the highest fourth component for stable, so rc -> stable increases.
+    return '%d.%d.%d.%d'%(*value[:3],value[4] if value[3]==0 else 65535)
+
+def runtime_pth_pair(archive):
+    names=[item.filename for item in archive.infolist() if not item.is_dir()]
+    pths=[name for name in names if __import__('re').fullmatch(r'python3[0-9]+\._pth',name)]
+    if len(pths)!=1:raise ValueError('Expected exactly one Python runtime path file')
+    companion=pths[0][:-5]+'.zip'
+    if companion not in names:raise ValueError('Runtime path file has no matching stdlib ZIP')
+    return pths[0],companion
+
 def build(source,runtime,wheels,dictionary,output,version):
     source=Path(source).resolve();output=Path(output).resolve();package.version_key(version)
     if output.exists():raise ValueError('Build output already exists; use a fresh directory')
@@ -19,12 +36,13 @@ def build(source,runtime,wheels,dictionary,output,version):
         if target.exists():raise ValueError('Duplicate build output: '+name)
         target.write_bytes(data);origins[name]=origin
     with zipfile.ZipFile(runtime) as z:
+        runtime_pth,runtime_zip=runtime_pth_pair(z)
         for item in z.infolist():
             if item.is_dir():continue
             name='runtime/'+item.filename
             data=z.read(item)
-            if item.filename=='python314._pth':data=b'python314.zip\n.\nsite-packages\n..\n../app/pae\n'
-            put(name,data,'official Python embeddable archive; isolated path file adjusted' if item.filename=='python314._pth' else lock['runtime']['url'])
+            if item.filename==runtime_pth:data=(runtime_zip+'\n.\nsite-packages\n..\n../app/pae\n').encode('ascii')
+            put(name,data,'official Python embeddable archive; isolated path file adjusted' if item.filename==runtime_pth else lock['runtime']['url'])
     for item in lock['wheels']:
         with zipfile.ZipFile(wheel_files[item['filename']]) as z:
             for entry in z.infolist():
@@ -45,18 +63,20 @@ def build(source,runtime,wheels,dictionary,output,version):
         if rel.startswith('pae/extension/'):
             if path.suffix in ('.js','.html'):data=data.decode('utf-8-sig').replace('127.0.0.1:4815','127.0.0.1:4817').encode('utf-8')
             if path.name=='manifest.json':
-                doc=json.loads(data);v=package.version_key(version);doc['version']='%d.%d.%d.%d'%(v[0],v[1],v[2],v[4] if v[3]==0 else 0);doc['version_name']=version
+                doc=json.loads(data);doc['version']=extension_version(version);doc['version_name']=version
                 doc['host_permissions']=[x.replace('127.0.0.1:4815','127.0.0.1:4817') for x in doc['host_permissions']];data=json.dumps(doc,ensure_ascii=False,indent=2).encode('utf-8')
             origin+='; packaged extension default port/version set'
         put('app/'+rel,data,origin)
     put('app/resources/ECDICT/dict.sqlite',Path(dictionary).read_bytes(),lock['dictionary']['url'])
-    for name in ('__init__.py','package.py','locks.py','admission.py','network.py','bootstrap.py','manage.html','manage.css','manage.js'):
+    for name in ('__init__.py','package.py','locks.py','admission.py','network.py','bootstrap.py','manage.html','manage.css','manage.js','uninstall_helper.py','uninstall_recovery.py'):
         put('distribution/'+name,(source/'distribution'/name).read_bytes(),'audited release lifecycle source')
     install='@echo off\r\nsetlocal\r\n"%~dp0runtime\\python.exe" -X utf8 -B -m distribution.bootstrap install %*\r\nif errorlevel 1 (\r\n  echo OpenGloss installation failed. No existing engine was stopped.\r\n  pause\r\n  exit /b 1\r\n)\r\n'
     put('Install.cmd',install.encode('ascii'),'generated one-click entry')
+    recover='@echo off\r\nsetlocal\r\n"%~dp0runtime\\python.exe" -X utf8 -B -m distribution.bootstrap recover %*\r\npause\r\n'
+    put('Recover.cmd',recover.encode('ascii'),'generated explicit recovery entry; never starts the engine')
     put('README-INSTALL.md',(source/'distribution/README-INSTALL.md').read_bytes(),'audited installation instructions')
     put('THIRD-PARTY.json',json.dumps(lock,ensure_ascii=False,indent=2).encode('utf-8'),'public build inputs and official hashes')
-    manifest={'format':1,'product':'OpenGloss','version':version,'platform':'windows-x64','source_base_commit':'caafa52f8af6b869aaa620b58fb8be58703e5272','status':'release candidate; verify Windows/browser acceptance before publishing','files':{name:{'sha256':digest(output/name),'size':(output/name).stat().st_size,'origin':origin} for name,origin in sorted(origins.items())}}
+    manifest={'format':1,'product':'OpenGloss','version':version,'platform':'windows-x64','source_base_commit':SOURCE_BASE_COMMIT,'status':'release candidate; verify Windows/browser acceptance before publishing','files':{name:{'sha256':digest(output/name),'size':(output/name).stat().st_size,'origin':origin} for name,origin in sorted(origins.items())}}
     package.atomic_json(output/package.MANIFEST,manifest);package.verify_directory(output)
     archive=output.with_suffix('.zip')
     if archive.exists():raise ValueError('Archive already exists')
@@ -68,6 +88,6 @@ def build(source,runtime,wheels,dictionary,output,version):
     return {'version':version,'files':len(manifest['files'])+1,'bytes':archive.stat().st_size,'sha256':digest(archive),'archive':str(archive)}
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--runtime',required=True,type=Path);parser.add_argument('--wheels',required=True,type=Path);parser.add_argument('--dictionary',required=True,type=Path);parser.add_argument('--output',required=True,type=Path);parser.add_argument('--version',default='0.4.0-rc.1')
+    parser=argparse.ArgumentParser();parser.add_argument('--runtime',required=True,type=Path);parser.add_argument('--wheels',required=True,type=Path);parser.add_argument('--dictionary',required=True,type=Path);parser.add_argument('--output',required=True,type=Path);parser.add_argument('--version',default=DEFAULT_VERSION)
     args=parser.parse_args();print(json.dumps(build(Path(__file__).resolve().parent.parent,args.runtime,args.wheels,args.dictionary,args.output,args.version),ensure_ascii=False))
 if __name__=='__main__':main()

@@ -1,21 +1,13 @@
 'use strict';
-const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const sourceRoot=process.argv[2]||require('path').resolve(__dirname,'../..');
-const defaultBase=process.argv[3]||'http://127.0.0.1:4815';
-const source=fs.readFileSync(sourceRoot+'/pae/extension/popup.js','utf8');
-async function trial(address,throws=false){
- const calls=[],pending=[];const elements={};
- for(const id of ['pae-toggle','state','eng'])elements[id]={textContent:'',className:'',addEventListener(){}};
- const chrome={storage:{local:{get(defaults,cb){if(throws&&defaults.paeBase)throw Error('synthetic storage unavailable');if(defaults.paeBase)pending.push(cb);else cb(defaults)},set(){}}}};
- vm.runInNewContext(source,{chrome,document:{getElementById:id=>elements[id]},fetch:async url=>{calls.push(url);return {ok:true,status:200}}});
- if(!throws){assert.equal(calls.length,0,'health must wait until configured address is known');assert.equal(pending.length,1);pending[0]({paeBase:address});}
- await Promise.resolve();await Promise.resolve();
- assert.deepStrictEqual(calls,[(address||defaultBase).replace(/\/+$/,'')+'/v1/health']);
- assert.equal(elements.eng.textContent,'running');
-}
+const assert=require('assert');const {environment,tick}=require('./test_extension_secure.cjs');const cases=[],executed=[],failed=[];
+async function run(name,fn){executed.push(name);try{await fn();cases.push(name)}catch(e){failed.push({name,error:String(e.stack||e)})}}
 (async()=>{
- await trial('http://127.0.0.1:54941/');
- await trial('');
- await trial(defaultBase,true);
- process.stdout.write(JSON.stringify({ok:true,scenarios:3,real_browser:false})+'\n');
-})().catch(e=>{process.stderr.write(String(e.stack)+'\n');process.exitCode=1});
+ await run('popup waits for complete pairing settings',async()=>{const e=environment('popup.js',{delay:true});assert.equal(e.calls.length+e.messages.length,0);e.release();await tick();assert(e.ids['pae-base']);assert(e.ids['pae-token']);assert.equal(e.ids['pae-base'].value,e.store.paeBase)});
+ await run('popup rejects remote addresses without storing credentials',async()=>{const e=environment('popup.js');await tick();e.ids['pae-base'].value='https://remote.invalid';e.ids['pae-token'].value='synthetic-new';e.ids['pae-save'].dispatch('click',{isTrusted:true});await tick();assert.equal(e.store.paeBase,'http://127.0.0.1:4815');assert.equal(e.store.paeToken,'synthetic-pairing-token');assert(/127\.0\.0\.1/.test(e.ids.eng.textContent))});
+ await run('popup rejects loopback port zero without storing credentials',async()=>{const e=environment('popup.js');await tick();e.ids['pae-base'].value='http://127.0.0.1:0';e.ids['pae-token'].value='synthetic-new';e.ids['pae-save'].dispatch('click',{isTrusted:true});await tick();assert.equal(e.store.paeBase,'http://127.0.0.1:4815');assert.equal(e.store.paeToken,'synthetic-pairing-token');assert(/端口|地址/.test(e.ids.eng.textContent))});
+ await run('popup saves valid local address and pairing token',async()=>{const e=environment('popup.js');await tick();e.ids['pae-base'].value='http://127.0.0.1:54941';e.ids['pae-token'].value='synthetic-new';e.ids['pae-save'].dispatch('click',{isTrusted:true});await tick();assert.equal(e.store.paeBase,'http://127.0.0.1:54941');assert.equal(e.store.paeToken,'synthetic-new')});
+ await run('unpaired health never represented as paired',async()=>{const e=environment('popup.js',{store:{paeToken:''}});await tick();assert(/未配对/.test(e.ids.eng.textContent));assert(!e.calls.some(c=>c.url.includes('/v1/cap/')))});
+ await run('old JSON response cannot overwrite new pairing rejection',async()=>{let finishOld,number=0;const e=environment('popup.js',{fetch:async()=>++number===1?{ok:true,status:200,json:()=>new Promise(resolve=>finishOld=resolve)}:{ok:false,status:401,json:async()=>({})}});await tick();assert.equal(typeof finishOld,'function');e.ids['pae-token'].value='synthetic-replacement';e.ids['pae-save'].dispatch('click',{isTrusted:true});await tick();assert(/401/.test(e.ids.eng.textContent));finishOld({ok:true,result:{}});await tick();assert(/401/.test(e.ids.eng.textContent));assert(!/运行中/.test(e.ids.eng.textContent))});
+ await run('backend error text is not reflected into pairing UI',async()=>{const e=environment('popup.js',{fetch:async()=>({ok:true,status:200,json:async()=>({ok:false,error:'synthetic-sensitive-provider-detail'})})});await tick();assert(!e.ids.eng.textContent.includes('synthetic-sensitive-provider-detail'));assert(/失败|不可用/.test(e.ids.eng.textContent))});
+ process.stdout.write(JSON.stringify({ok:!failed.length,cases,count:cases.length,executed,executed_count:executed.length,failed_count:failed.length,failed,real_browser:false})+'\n');
+if(failed.length)process.exitCode=1;})().catch(e=>{process.stderr.write(String(e.stack)+'\n');process.exitCode=1});

@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
+  "version": "0.5.0",
   "generated": "2026-10-01",
   "note": "PAE 能力面单一真相源。内置 companion 与外部智能体（Claude Code / Cursor / 其他 MCP 客户端 / 你的脚本）走同一份清单、同一套守门、同一份配额。status=planned 的能力只有设计没有实现——这是防「图纸当房子」的诚实标注。",
   "transports": [
@@ -11,7 +11,7 @@
     {
       "name": "mcp",
       "status": "implemented",
-      "note": "由 mcp_server.py 提供（stdio）；tools/list 返回同一份清单（实测 41 工具，t18_mcp.json PASS）"
+      "note": "mcp_server.py stdio；PAE_KEY作为scoped Bearer优先；PAE_HTTP_TOKEN仅显式全权替代；不读取root文件，无凭据拒绝，HTTP错误不终止主循环"
     },
     {
       "name": "skill",
@@ -21,13 +21,15 @@
     }
   ],
   "auth": {
-    "header": "X-PAE-Key",
-    "note": "不带头 = local（用户本机扩展，保持向后兼容）；带头则必须匹配 keys.json 中的 sha256，否则 401",
+    "header": "Authorization: Bearer <scoped-actor-key-or-full-trust-instance-token>",
+    "note": "Instance pairing token is full local/user authority. Never share it as a scoped tool credential. An issued actor key is accepted directly as Bearer and fixes actor/scopes even without X-PAE-Key. A scoped Bearer with conflicting/empty X-PAE-Key is rejected. Root plus legacy Xkey narrows only this request; root possession still grants full user rights. Missing/unknown/duplicate credentials fail closed. local/user/companion are reserved internal identities; old keyed records for them are rejected. Only minimal anonymous health is public; scoped callers do not receive private health identity.",
     "scopes": [
       "read",
       "write",
       "admin"
-    ]
+    ],
+    "http_header": "Authorization: Bearer <credential>",
+    "legacy_header": "X-PAE-Key (optional same scoped key; root may narrow this request)"
   },
   "capabilities": [
     {
@@ -42,13 +44,17 @@
       "http": {
         "method": "GET",
         "path": "/v1/health"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.annotate",
       "kind": "observe",
       "status": "implemented",
-      "scope": "read",
+      "scope": "write",
       "side_effect": "appends_events",
       "description": "给一段文本返回注解（含记账：写入 encounter 事件）",
       "params": {
@@ -71,7 +77,10 @@
         "method": "POST",
         "path": "/v1/annotate"
       },
-      "alias_of": "/v1/annotate"
+      "alias_of": "/v1/annotate",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.status",
@@ -85,7 +94,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/status"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.config",
@@ -99,7 +112,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/config"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.event",
@@ -107,7 +124,7 @@
       "status": "implemented",
       "scope": "write",
       "side_effect": "appends_events",
-      "description": "上报观察/交互事件（annotation_shown / hover / known_click）——三证据的发射口",
+      "description": "上报观察事件并保留认证来源；外部/companion 仅 annotation_shown、hover；known_click/user_pin/user_mastered 仅可信用户，工具掌握操作须走 pae.pin",
       "params": {
         "type": {
           "type": "string",
@@ -143,7 +160,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/event"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.persona",
@@ -157,7 +177,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/persona"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.persona.preview",
@@ -176,7 +200,11 @@
       "http": {
         "method": "POST",
         "path": "/v1/persona/preview"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.persona.update",
@@ -195,7 +223,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/persona"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.persona.say",
@@ -220,14 +251,17 @@
       "http": {
         "method": "POST",
         "path": "/v1/persona/say"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.context",
       "kind": "observe",
       "status": "implemented",
       "scope": "read",
-      "side_effect": "none",
+      "side_effect": "none (read-only effective projection; expired overrides excluded without rollback)",
       "description": "完整上下文装配（L0–L6；1M 策略=默认全量装载，超限按固定顺序渐进裁剪）",
       "params": {
         "scope": {
@@ -256,7 +290,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.context"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.word",
@@ -275,7 +312,11 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.word"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.trend",
@@ -290,7 +331,11 @@
           "default": 7
         }
       },
-      "returns": "{days, series}"
+      "returns": "{days, series}",
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.grammar",
@@ -304,7 +349,11 @@
           "type": "string"
         }
       },
-      "returns": "{point_id, state}"
+      "returns": "{point_id, state}",
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.events",
@@ -328,7 +377,11 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.events"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.decisions",
@@ -350,7 +403,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/cap/pae.decisions"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.page",
@@ -374,7 +431,11 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.page"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.metrics",
@@ -397,7 +458,11 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.metrics"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.memory.search",
@@ -415,7 +480,11 @@
           "default": 5
         }
       },
-      "returns": "[{fact_id, kind, text, confidence}]"
+      "returns": "[{fact_id, kind, text, confidence}]",
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.memory.recent",
@@ -433,7 +502,11 @@
           "default": 10
         }
       },
-      "returns": "[{turn_id, role, text, ts}]"
+      "returns": "[{turn_id, role, text, ts}]",
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.propose",
@@ -462,7 +535,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.propose"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.pin",
@@ -470,14 +546,17 @@
       "status": "implemented",
       "scope": "write",
       "side_effect": "appends_events",
-      "description": "标记「认识了」（写 user_pin/known_click 事件）",
+      "description": "工具有意标记掌握，写 user_pin 并按认证actor限制每天20次；真实用户保留原权限",
       "params": {
         "lemma": {
           "type": "string",
           "required": true
         }
       },
-      "returns": "{ok, s_value}"
+      "returns": "{ok, s_value}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.remember",
@@ -499,7 +578,10 @@
           "required": true
         }
       },
-      "returns": "{fact_id, ok}"
+      "returns": "{fact_id, ok}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.forget",
@@ -514,7 +596,10 @@
           "required": true
         }
       },
-      "returns": "{ok}"
+      "returns": "{ok}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.say",
@@ -532,7 +617,10 @@
           "type": "string"
         }
       },
-      "returns": "{ok, delivered}"
+      "returns": "{ok, delivered}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.hint",
@@ -554,7 +642,10 @@
           ]
         }
       },
-      "returns": "{ok}"
+      "returns": "{ok}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.session.open",
@@ -568,7 +659,10 @@
           "type": "string"
         }
       },
-      "returns": "{session_id}"
+      "returns": "{session_id}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.session.turn",
@@ -594,7 +688,10 @@
           "type": "array"
         }
       },
-      "returns": "{turn_id}"
+      "returns": "{turn_id}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.session.close",
@@ -612,7 +709,10 @@
           "type": "string"
         }
       },
-      "returns": "{ok}"
+      "returns": "{ok}",
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.push.log",
@@ -634,21 +734,28 @@
       "http": {
         "method": "GET",
         "path": "/v1/push/log"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.params",
       "kind": "observe",
       "status": "implemented",
       "scope": "read",
-      "side_effect": "none",
+      "side_effect": "none (read-only effective projection; expired overrides excluded without rollback)",
       "description": "当前变量：覆盖层 + 有效值 + 默认值 + 取值范围（AI 改了什么都看得见）",
       "params": {},
       "returns": "{overrides, effective, defaults, ranges}",
       "http": {
         "method": "GET",
         "path": "/v1/cap/pae.params"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.agent.tick",
@@ -671,7 +778,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.agent.tick"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.agent.log",
@@ -690,7 +800,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/cap/pae.agent.log"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.audit",
@@ -712,7 +826,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/cap/pae.audit"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.permissions",
@@ -726,7 +844,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/cap/pae.permissions"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.agent.schedule",
@@ -740,7 +862,11 @@
       "http": {
         "method": "GET",
         "path": "/v1/cap/pae.agent.schedule"
-      }
+      },
+      "capability_http_methods": [
+        "GET",
+        "POST"
+      ]
     },
     {
       "name": "pae.agent.schedule.set",
@@ -765,7 +891,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.agent.schedule.set"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.key.issue",
@@ -785,14 +914,17 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.key.issue"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.outcomes",
       "kind": "observe",
       "status": "implemented",
       "scope": "read",
-      "side_effect": "none",
+      "side_effect": "read-only by default; evaluate_decisions=true requires write scope",
       "description": "**结果侧指标（尺子）**：至少 eval_days 天前被注解过的词里，后来真的点过「认识了」的比例；并回填每次参数变更的前后效果",
       "params": {
         "eval_days": {
@@ -808,14 +940,17 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.outcomes"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.familiarity",
       "kind": "observe",
       "status": "implemented",
       "scope": "read",
-      "side_effect": "writes_projection",
+      "side_effect": "read-only projection by default; recompute=true requires write scope",
       "description": "熟悉度投影（35号）：谁会被「无视即熟悉」豁免、为什么；默认 shadow 模式（只记录不生效）",
       "params": {
         "recompute": {
@@ -831,7 +966,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.familiarity"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.familiarity.restore",
@@ -850,7 +988,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.familiarity.restore"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.sensejudge",
@@ -874,7 +1015,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.sensejudge"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     },
     {
       "name": "pae.mute",
@@ -892,7 +1036,10 @@
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.mute"
-      }
+      },
+      "capability_http_methods": [
+        "POST"
+      ]
     }
   ]
 }

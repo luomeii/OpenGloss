@@ -1,5 +1,5 @@
 """PAE engine service logic (no HTTP). Events -> states -> annotations."""
-from . import health
+from . import health, privacy
 from .event_batch import EventBatch
 from .db_access import access, guarded
 import hashlib
@@ -133,8 +133,13 @@ class Engine:
         return ordered
 
     @guarded
-    def annotate(self, text, page_id, session_id=None):
+    def annotate(self, text, page_id, session_id=None, max_annotations=None):
         health.require_clean(self.conn)
+        if max_annotations is not None and (type(max_annotations) is not int or max_annotations < 0):
+            raise ValueError("max_annotations must be a nonnegative integer")
+        limit = BUDGET if max_annotations is None else min(BUDGET, max_annotations)
+        if limit == 0:
+            return []
         text = text or ""
         page_id = str(page_id)
         # 参数陈旧就刷新（最多滞后 5 秒）——ttl 到期自动回滚靠这个生效
@@ -224,7 +229,7 @@ class Engine:
                 return 2 if _band_lo <= _c[1] <= _band_hi else 1
 
             _cands.sort(key=lambda _c: (-_prio(_c), abs(_c[1] - _mid)))
-        chosen = set(_c[0] for _c in _cands[:BUDGET])
+        chosen = set(_c[0] for _c in _cands[:limit])
 
         with EventBatch(self) as batch:
             for tok in tokens:
@@ -265,6 +270,7 @@ class Engine:
                     "page_id": page_id,
                     "session_id": session_id,
                 }
+                payload = privacy.stored_payload(payload)
                 with self.lock:
                     # 内存判重优先：seen_idem 命中则不碰数据库
                     if idem_key in self.seen_idem:
@@ -297,7 +303,7 @@ class Engine:
                         "s_value": round(s, 3),
                         "counted": event_id is not None,
                     })
-                if len(out) >= BUDGET:
+                if len(out) >= limit:
                     break
         # 主动说话（问题一修复，2026-10-03）：规则版自发触发，补上引擎侧唯一缺失的 say 生产者。
         # 2026-10-03 二次反馈升级：命中触发时可能走 LLM（1-2 秒）——绝不能挂在注解响应里
@@ -342,6 +348,7 @@ class Engine:
         for k in ("page_id", "session_id", "s_value", "page_active_ms", "sentence"):
             if m.get(k) is not None:
                 payload[k] = m[k]
+        payload = privacy.stored_payload(payload)
         with self.lock:
             if idem_key in self.seen_idem:
                 return {"ok": True, "counted": False, "reason": "duplicate_bucket"}
@@ -369,7 +376,7 @@ class Engine:
             st = self.states.get((lemma, 0))
             s = round(st.s_value(self.params), 3) if st is not None else 0.0
         # 悬停 = 最强兴趣信号 → 异步跑义项判定影子（P5 第一步：只写缓存与日志，不上屏）
-        if etype == "hover" and (metas or {}).get("sentence") and lemma:
+        if privacy.settings()["shadow_model"] and etype == "hover" and (metas or {}).get("sentence") and lemma:
             try:
                 import threading as _th
                 _th.Thread(target=self._shadow_judge, args=(lemma, metas.get("sentence")),
@@ -380,6 +387,8 @@ class Engine:
 
     def _shadow_judge(self, lemma, sentence):
         """义项判定影子：失败静默（不影响任何用户可见行为）。"""
+        if not privacy.settings()["shadow_model"]:
+            return
         try:
             from . import sensejudge as _sj
             _sj.judge(self.conn, DICT_SQLITE_PATH, lemma, sentence)
@@ -434,3 +443,4 @@ def get_engine() -> Engine:
             if _ENGINE is None:
                 _ENGINE = Engine(DB_PATH, LEMMA_PATH)
     return _ENGINE
+

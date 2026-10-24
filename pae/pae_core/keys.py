@@ -4,6 +4,7 @@
 keys.json 在 pae/ 下，已 gitignore（含 sha256，仍属敏感）。
 """
 import hashlib
+import hmac
 import json
 import secrets
 from pathlib import Path
@@ -12,9 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 KEYFILE = Path(__import__("os").environ.get("PAE_KEYS_PATH") or (ROOT / "keys.json"))
 
 DEFAULT_ACTORS = {
-    "local": {"scopes": ["read", "write", "admin"], "note": "本机扩展（无 key 时默认）"},
+    "local": {"scopes": ["read", "write", "admin"], "note": "仅进程内无 key 兼容；HTTP 需真实配对 Bearer"},
     "companion": {"scopes": ["read", "write"], "note": "内置角色"},
 }
+
+
+RESERVED_ACTORS = frozenset({"local", "user", "companion"})
 
 
 def _load() -> dict:
@@ -34,6 +38,8 @@ def sha(text: str) -> str:
 
 def issue(actor: str, scopes=None) -> str:
     """签发一个 key，返回明文（只此一次）。"""
+    if actor in RESERVED_ACTORS:
+        raise ValueError("reserved_actor")
     d = _load()
     d.setdefault("actors", {})
     plain = "pae_" + secrets.token_urlsafe(24)
@@ -51,9 +57,19 @@ def resolve(key: str):
     if not key:
         return "local", DEFAULT_ACTORS["local"]["scopes"]
     h = sha(key)
-    for actor, rec in (_load().get("actors") or {}).items():
-        if rec.get("key_sha256") == h:
-            return actor, rec.get("scopes") or ["read"]
+    document = _load()
+    actors = document.get("actors", {}) if isinstance(document, dict) else {}
+    if not isinstance(actors, dict): return None, None
+    for actor, rec in actors.items():
+        if not isinstance(rec, dict): continue
+        digest = rec.get("key_sha256")
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest): continue
+        if hmac.compare_digest(digest, h):
+            if actor in RESERVED_ACTORS:
+                return None, None
+            scopes = rec.get("scopes") or ["read"]
+            if not isinstance(scopes, list) or any(s not in ("read", "write", "admin") for s in scopes): return None, None
+            return actor, scopes
     return None, None
 
 

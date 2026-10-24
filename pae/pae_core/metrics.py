@@ -4,6 +4,7 @@
 设计：不新增存储，一切从 events 推导（事件溯源的红利）。
 """
 from . import health
+from .privacy import page_identity_resolver
 from .db_access import access, guarded, batched_rows
 from .read_snapshot import read_snapshot
 import json
@@ -31,7 +32,9 @@ def _metric_inputs(conn, days=7):
     first_rows = conn.execute(
         "SELECT MIN(ts), json_extract(payload, '$.lemma') FROM events"
         " WHERE type='encounter' GROUP BY json_extract(payload, '$.lemma')").fetchall()
-    return now, rows, first_rows
+    from . import params as params_mod
+    budget = int(params_mod.effective(conn, readonly=True)["max_ann_per_page"])
+    return now, rows, first_rows, budget
 
 
 def compute(conn, days=7, min_exposure=3, top_n=10):
@@ -44,7 +47,7 @@ def compute(conn, days=7, min_exposure=3, top_n=10):
 
 def _compute_from_inputs(inputs, days=7, min_exposure=3, top_n=10):
     """返回指标字典。days=统计窗口天数。"""
-    now, rows, first_rows = inputs
+    now, rows, first_rows, budget = inputs
     since = now - days * 86400
 
     enc = 0
@@ -53,6 +56,7 @@ def _compute_from_inputs(inputs, days=7, min_exposure=3, top_n=10):
     click = {}      # lemma -> 「认识了」数
     per_page = {}   # (page_id) -> 曝光数（用于预算利用率）
     lemmas_seen = set()
+    resolve_page = page_identity_resolver()
     for ts, etype, payload in rows:
         p = _payload((ts, etype, payload))
         lemma = p.get("lemma") or p.get("lemma_id") or ""
@@ -63,7 +67,7 @@ def _compute_from_inputs(inputs, days=7, min_exposure=3, top_n=10):
         elif etype == "annotation_shown":
             if lemma:
                 exposure[lemma] = exposure.get(lemma, 0) + 1
-                pg = p.get("page_id") or ""
+                pg = resolve_page(p)
                 per_page[pg] = per_page.get(pg, 0) + 1
         elif etype == "hover":
             if lemma:
@@ -96,7 +100,6 @@ def _compute_from_inputs(inputs, days=7, min_exposure=3, top_n=10):
         })
     ignored.sort(key=lambda x: (-x["ignore_rate"], -x["exposure"]))
 
-    budget = 8  # 每请求预算（26 号算法规格）
     pages = [v for v in per_page.values() if v > 0]
     avg_per_page = (sum(pages) / len(pages)) if pages else 0.0
     return {
@@ -108,10 +111,12 @@ def _compute_from_inputs(inputs, days=7, min_exposure=3, top_n=10):
         "annotation_exposure": total_exposure,
         "hover_rate": round(total_hover / total_exposure, 3) if total_exposure else 0.0,
         "click_rate": round(total_click / total_exposure, 3) if total_exposure else 0.0,
-        "budget_utilization": round(min(1.0, avg_per_page / budget), 3) if pages else 0.0,
+        "budget_utilization": round(min(1.0, avg_per_page / budget), 3) if pages and budget > 0 else 0.0,
+        "budget_denominator": budget,
+        "budget_basis": "Clipped proxy: cumulative annotation_shown per page in this window / current effective page budget; not historical or per-request utilization.",
         "avg_annotations_per_page": round(avg_per_page, 2),
         "top_ignored_words": ignored[:top_n],
-        "note": "top_ignored_words = 曝光多但几乎没人悬停/点击的词 → 这是「噪声词」的直接证据",
+        "note": "top_ignored_words 是曝光多且少悬停/点击的诊断候选；不能证明用户认识该词、没有注意到或该注解是噪声。encounter 表示请求侧记账，annotation_shown 才是扩展报告的展示。",
     }
 
 
@@ -186,9 +191,9 @@ def _outcome_inputs(conn):
         effects = []
     try:
         pushes = conn.execute("SELECT COUNT(*) FROM push_log WHERE ts >= ?", (now - 7 * 86400,)).fetchone()[0]
-        buckets = conn.execute(
-            "SELECT COUNT(DISTINCT COALESCE(json_extract(payload,'$.page_id'),'') || '|' || (ts/3600))"
-            " FROM events WHERE type='annotation_shown' AND ts >= ?", (now - 7 * 86400,)).fetchone()[0]
+        page_rows = conn.execute("SELECT ts, payload FROM events WHERE type='annotation_shown' AND ts>=?", (now - 7 * 86400,)).fetchall()
+        resolve_page = page_identity_resolver()
+        buckets = len({(resolve_page(json.loads(payload or "{}")), ts // 3600) for ts, payload in page_rows})
     except Exception:
         pushes, buckets = 0, 0
     return now, first, known, hover, effects, pushes, buckets
