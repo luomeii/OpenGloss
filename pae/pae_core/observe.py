@@ -4,7 +4,7 @@
 上下文策略（用户 2026-10-01 拍板）：1M 上下文很充裕 → **默认全量装载**，
 只在超过单请求上限时按固定顺序渐进裁剪（先丢最老的对话 → 再丢低置信记忆 → 最后丢低 S 的词）。
 """
-from . import health
+from . import health, privacy
 from .db_access import access, guarded
 from .read_snapshot import ReadSnapshot
 import json
@@ -112,7 +112,7 @@ def events(engine, params: dict):
         except Exception:
             p = {}
         out.append({"ts": ts, "type": etype, "payload": p})
-    return out
+    return privacy.output_projection(out)
 
 
 @guarded
@@ -160,7 +160,7 @@ def trend(engine, days=7):
 
 
 @guarded
-def page(engine, params: dict):
+def _page(engine, params: dict):
     """页面现场：优先用调用方给的；否则取最近一次曝光上报的页面。"""
     if params.get("url") or params.get("annotated"):
         return {
@@ -187,6 +187,10 @@ def page(engine, params: dict):
         "source": "last_exposure",
         "ts": ts,
     }
+
+
+def page(engine, params: dict):
+    return privacy.output_projection(_page(engine, params))
 
 
 @guarded
@@ -255,7 +259,7 @@ def _assemble_snapshot(engine, params: dict, reader=None):
         }
     if "limits" in include:
         from . import params as params_mod
-        eff = params_mod.effective(engine.conn)   # ← 读**有效参数**，不再读静态 config（修自我感知漂移）
+        eff = params_mod.effective(engine.conn, readonly=True)   # ← 读**有效参数**，不再读静态 config（修自我感知漂移）
         ctx["limits"] = {
             "annotate_max_s": eff.get("annotate_max_s"),
             "budget_per_request": int(cfg.get("budget", 8)),
@@ -307,4 +311,4 @@ def assemble(engine, params: dict):
         toks = estimate_tokens(ctx)
     ctx["budget_tokens"] = {"estimate": toks, "cap": cap, "trimmed": trimmed, "policy": "1M_full_then_trim"}
     health.check(engine)
-    return ctx
+    return privacy.output_projection(ctx)

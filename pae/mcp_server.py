@@ -9,10 +9,13 @@
 设计：本进程是**薄客户端**——所有调用转发到 http://127.0.0.1:4815 的能力面，
 因此鉴权、守门、配额、审计与内置角色完全一致（同一套能力，没有第二条路）。
 
-环境变量：PAE_BASE（默认 http://127.0.0.1:4815）、PAE_KEY（可选；不带=本机用户，最高写权）
+环境变量：PAE_BASE（精确 http://127.0.0.1:port，默认4815）。
+默认连接本机单用户引擎，无需配对。PAE_KEY 可选，供已有外部 actor 使用受限能力；
+不读取或生成实例口令。本机接口不是同账户恶意程序之间的隔离边界。
 """
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -26,20 +29,47 @@ for _s in (sys.stdin, sys.stdout):
     except Exception:
         pass
 
-BASE = os.environ.get("PAE_BASE", "http://127.0.0.1:4815").rstrip("/")
+BASE = os.environ.get("PAE_BASE", "http://127.0.0.1:4815")
 KEY = os.environ.get("PAE_KEY", "")
 PROTOCOL = "2024-11-05"
-SERVER = {"name": "pae", "version": "0.3.0"}
+SERVER = {"name": "pae", "version": "0.5.0"}
+
+
+class ClientError(RuntimeError):
+    pass
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError("", code, "redirect refused", headers, fp)
 
 
 def _http(path, body=None, method=None):
+    match = re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})", BASE)
+    if match is None or int(match.group(1)) > 65535:
+        raise ClientError("invalid PAE_BASE")
     hdr = {"Content-Type": "application/json"}
     if KEY:
         hdr["X-PAE-Key"] = KEY
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, headers=hdr, method=method)
-    with urllib.request.urlopen(req, timeout=180) as r:
-        return json.loads(r.read().decode("utf-8"))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(req, timeout=180) as response:
+        raw = response.read(33554433)
+    if len(raw) > 33554432:
+        raise ClientError("engine response too large")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _error_text(exc):
+    if isinstance(exc, ClientError):
+        return str(exc)
+    if isinstance(exc, urllib.error.HTTPError):
+        exc.close()
+        return "engine HTTP %d" % exc.code
+    if isinstance(exc, (urllib.error.URLError, OSError)):
+        return "engine unavailable"
+    return "engine request failed"
 
 
 def manifest():
@@ -70,7 +100,7 @@ def tools():
         if c.get("status") != "implemented":
             continue
         desc = c.get("description", "")
-        if c.get("kind") == "observe":
+        if c.get("scope") == "read":
             desc = "[只读] " + desc
         out.append({"name": c["name"].replace(".", "_"), "description": desc + ("｜原能力名：" + c["name"]),
                     "inputSchema": _schema(c)})
@@ -94,6 +124,8 @@ def tool_to_cap(name):
                 m[c["name"].replace(".", "_")] = c["name"]
             if m:
                 _TOOL2CAP = m      # 只有成功拿到清单才缓存；失败下次重试（别永久降级）
+        except urllib.error.HTTPError as exc:
+            exc.close()
         except Exception:
             pass
     if _TOOL2CAP and name in _TOOL2CAP:   # 引擎不可用时优雅退化为兜底，不抛异常
@@ -109,16 +141,8 @@ def call_tool(name, arguments):
         body = _http("/v1/cap/" + cap_name, arguments or {})
         return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}],
                 "isError": not body.get("ok", False)}, None
-    except urllib.error.HTTPError as e:
-        try:
-            detail = e.read().decode("utf-8")
-        except Exception:
-            detail = ""
-        return {"content": [{"type": "text", "text": "HTTP %d %s" % (e.code, detail[:500])}],
-                "isError": True}, None
-    except Exception as e:
-        return {"content": [{"type": "text", "text": "%s: %s" % (type(e).__name__, str(e)[:200])}],
-                "isError": True}, None
+    except Exception as exc:
+        return {"content": [{"type": "text", "text": _error_text(exc)}], "isError": True}, None
 
 
 def handle(msg):
@@ -129,12 +153,15 @@ def handle(msg):
             "protocolVersion": PROTOCOL,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER,
-            "instructions": "PAE：本地被动英语习得引擎。只读能力随便用（看趋势/词/指标/记忆/人格）；"
+            "instructions": "PAE：本地被动英语习得引擎。所有能力需相应 scope；annotate 会写 encounter。"
                             "写能力有守门与配额，被拒时看返回的 gate_result 再调整。"}}
     if method == "notifications/initialized":
         return None
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": tools()}}
+        try:
+            return {"jsonrpc": "2.0", "id": mid, "result": {"tools": tools()}}
+        except Exception as exc:
+            return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": _error_text(exc)}}
     if method == "tools/call":
         p = msg.get("params") or {}
         result, _ = call_tool(p.get("name") or "", p.get("arguments") or {})

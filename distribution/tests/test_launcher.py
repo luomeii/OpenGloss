@@ -18,10 +18,10 @@ class LauncherContracts(unittest.TestCase):
   for url in ['http://github.com/luomeii/OpenGloss','https://github.com.evil.test/file','file:///synthetic','https://127.0.0.1:4815','https://user:pass@github.com/file']:
    with self.subTest(url=url):self.assertRaises(ValueError,network.allowed_url,url)
   self.assertTrue(network.allowed_url('https://release-assets.githubusercontent.com/synthetic'))
- def test_mutations_require_token_and_local_origin(self):
-  if bootstrap is None:self.skipTest('launcher missing')
-  self.assertTrue(bootstrap.authorized({'X-OpenGloss-Token':'synthetic-token','Origin':'http://127.0.0.1:54936'},'synthetic-token',54936))
-  for headers in [{},{'X-OpenGloss-Token':'wrong'},{'X-OpenGloss-Token':'synthetic-token','Origin':'https://evil.test'}]:self.assertFalse(bootstrap.authorized(headers,'synthetic-token',54936))
+ def test_mutations_keep_local_origin_boundary_without_tokens(self):
+  self.assertTrue(bootstrap.trusted_management({},54936))
+  self.assertTrue(bootstrap.trusted_management({'Origin':'http://127.0.0.1:54936'},54936))
+  for headers in [{'Origin':'https://evil.test'},{'Origin':'null'},{'Sec-Fetch-Site':'cross-site'}]:self.assertFalse(bootstrap.trusted_management(headers,54936))
  def test_shutdown_admission_prevents_future_jobs_and_rejects_while_busy(self):
   if bootstrap is None:self.skipTest('launcher missing')
   import json

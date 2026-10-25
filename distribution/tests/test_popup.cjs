@@ -1,21 +1,3 @@
 'use strict';
-const fs=require('fs'),vm=require('vm'),assert=require('assert');
-const sourceRoot=process.argv[2]||require('path').resolve(__dirname,'../..');
-const defaultBase=process.argv[3]||'http://127.0.0.1:4815';
-const source=fs.readFileSync(sourceRoot+'/pae/extension/popup.js','utf8');
-async function trial(address,throws=false){
- const calls=[],pending=[];const elements={};
- for(const id of ['pae-toggle','state','eng'])elements[id]={textContent:'',className:'',addEventListener(){}};
- const chrome={storage:{local:{get(defaults,cb){if(throws&&defaults.paeBase)throw Error('synthetic storage unavailable');if(defaults.paeBase)pending.push(cb);else cb(defaults)},set(){}}}};
- vm.runInNewContext(source,{chrome,document:{getElementById:id=>elements[id]},fetch:async url=>{calls.push(url);return {ok:true,status:200}}});
- if(!throws){assert.equal(calls.length,0,'health must wait until configured address is known');assert.equal(pending.length,1);pending[0]({paeBase:address});}
- await Promise.resolve();await Promise.resolve();
- assert.deepStrictEqual(calls,[(address||defaultBase).replace(/\/+$/,'')+'/v1/health']);
- assert.equal(elements.eng.textContent,'running');
-}
-(async()=>{
- await trial('http://127.0.0.1:54941/');
- await trial('');
- await trial(defaultBase,true);
- process.stdout.write(JSON.stringify({ok:true,scenarios:3,real_browser:false})+'\n');
-})().catch(e=>{process.stderr.write(String(e.stack)+'\n');process.exitCode=1});
+const assert=require('assert');const {environment,tick}=require('./test_extension_secure.cjs');
+(async()=>{const cases=[];const e=environment('popup.js',{store:{paeBase:'https://ignored.invalid',paeToken:''}});await tick();assert(e.calls.some(c=>c.url==='http://127.0.0.1:4815/v1/health'));assert(e.calls.every(c=>!c.init?.headers?.Authorization));cases.push('fresh popup uses fixed local service without credentials');assert(!e.ids['pae-base']&&!e.ids['pae-token']);cases.push('no address or token input');e.ids['pae-toggle'].dispatch('click',{isTrusted:true});await tick();assert.equal(e.store.paeEnabled,false);cases.push('annotation toggle persists');console.log(JSON.stringify({ok:true,count:cases.length,cases,real_browser:false}))})().catch(e=>{console.error(e);process.exitCode=1});

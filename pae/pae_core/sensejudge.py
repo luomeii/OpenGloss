@@ -6,7 +6,7 @@
 - 失败零可见：超时/坏 JSON/越界 → 保持确定性释义，不重试不提示
 - 候选义项从 dict.sqlite 现场取全文（内存里的精简释义不够判）
 """
-from . import health
+from . import health, quota
 from .db_access import access, guarded
 import hashlib
 import json
@@ -19,7 +19,6 @@ PROMPT_VERSION = "sj_v1"
 MODEL_HINT = "flash"
 TIMEOUT_S = 5
 DAILY_CALL_CAP = 150
-PER_PAGE_CAP = 8
 
 DDL = """
 CREATE TABLE IF NOT EXISTS sense_cache (
@@ -165,7 +164,8 @@ def judge(conn, dict_path, lemma, sentence, llm_chat=None):
             _log(conn, out, "L2")
             conn.commit()
             return out
-        if _calls_today(conn) >= DAILY_CALL_CAP:
+        attempt = quota.reserve(conn, "pae.sensejudge", DAILY_CALL_CAP)
+        if attempt is None:
             out["reason"] = "daily_cap"
             out["fallback"] = 1
             _log(conn, out, "L2")
@@ -195,6 +195,7 @@ def judge(conn, dict_path, lemma, sentence, llm_chat=None):
         out["reason"] = "llm_error:" + type(e).__name__
     with access(conn):
         health.require_clean(conn)
+        quota.finish(conn, attempt, "response" if chosen is not None else "failed")
         out["latency_ms"] = int((time.time() - t0) * 1000)
         if chosen is None:
             out["fallback"] = 1
@@ -229,8 +230,10 @@ def stats(conn):
     reasons = conn.execute("SELECT reason, COUNT(*) FROM sense_shadow_log WHERE ts >= ? AND fallback = 1 GROUP BY reason",
                            (day0,)).fetchall()
     cache = conn.execute("SELECT key_level, COUNT(*) FROM sense_cache GROUP BY key_level").fetchall()
-    return {"prompt_version": PROMPT_VERSION, "daily_call_cap": DAILY_CALL_CAP,
+    counts = quota.usage(conn, "pae.sensejudge")
+    return {**counts, "attempts_remaining": max(0, DAILY_CALL_CAP - counts["attempts_today"]),
+            "prompt_version": PROMPT_VERSION, "daily_call_cap": DAILY_CALL_CAP,
             "calls_today": calls, "fallback_today": fb,
             "fallback_rate": (round(fb / (calls + fb), 3) if (calls + fb) else None),
             "skip_reasons": dict(reasons), "cache": dict(cache),
-            "note": "影子期：只记录不上屏。fallback=1 表示没调 LLM（免费规则拦下）或调用失败。"}
+            "note": "calls_today统计有效判定成功，非真实花费；日限按持久预占尝试计（含失败/并发中/未知结果），免费预筛不占次数。fallback=1包括免费跳过或模型失败。"}

@@ -3,18 +3,20 @@ import json
 import time
 from pathlib import Path
 
-from fastapi import Body, FastAPI, Header, Response
+from fastapi import Body, FastAPI, Response, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from . import health as runtime_health
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 
+from . import http_security
+from .http_security import config_projection
 from . import capsurface
 from . import llm as llm_mod
 from . import persona as persona_mod
 from .engine import get_engine
 
-app = FastAPI(title="PAE")
+app = FastAPI(title="PAE", docs_url=None, redoc_url=None, openapi_url=None)
 
 
 @app.exception_handler(runtime_health.EngineUnavailable)
@@ -38,6 +40,29 @@ async def business_admission(request, call_next):
         return await unavailable_response(request, exc)
 
 
+@app.middleware("http")
+async def http_boundary(request, call_next):
+    if not http_security.trusted_request(request):
+        return JSONResponse(status_code=403, content={"ok": False, "error": "untrusted_host_or_origin"})
+    try:
+        identity = http_security.local_identity(request)
+    except (ValueError, OSError):
+        return JSONResponse(status_code=401, content={"ok": False, "error": "invalid_actor_key"})
+    request.state.http_identity = identity
+    path = request.url.path
+    if request.method in ("POST","PUT","PATCH") and path.startswith('/v1/') and request.headers.get('content-type','').split(';')[0].strip().lower()!='application/json':
+        return JSONResponse(status_code=415,content={"ok":False,"error":"json_required"})
+    if identity is not None and identity[0] not in ("local", "user"):
+        actor, scopes = identity
+        read_paths = {"/v1/health", "/v1/config", "/v1/status", "/v1/persona", "/v1/push/log", "/v1/ext/stream"}
+        if path == "/v1/cap/manifest" or not path.startswith("/v1/cap/"):
+            if "read" not in scopes:
+                return JSONResponse(status_code=403, content={"ok": False, "error": "scope_denied"})
+        if path.startswith("/v1/") and not path.startswith("/v1/cap/") and (request.method != "GET" or path not in read_paths):
+            return JSONResponse(status_code=403, content={"ok": False, "error": "use_capability_endpoint"})
+    return await call_next(request)
+
+
 # 引擎配置：pae/config.json（相对本文件 ../../config.json）
 from .paths import config_path
 CONFIG_PATH = config_path()
@@ -54,36 +79,29 @@ class AnnotateBody(BaseModel):
     text: str = ""
     page_id: str = "default"
     session_id: str = ""
+    max_annotations: StrictInt | None = Field(default=None, ge=0)
 
 
 @app.get("/v1/health")
-def health(resp: Response):
-    """检查初始化及运行期可服务状态；隔离、关闭或未知事务返回503。
-
-    字典初始化错误仍保留安装提示；运行期检查不会提交或回滚业务事务。
-    """
-    from .engine import DB_PATH as _DB
+def health(resp: Response, request: Request):
+    from .engine import DB_PATH
     try:
-        get_engine().check_health()       # 同时检查运行期健康及遗留事务
-    except Exception as e:
+        get_engine().check_health()
+    except Exception:
         resp.status_code = 503
-        msg = "%s: %s" % (type(e).__name__, e)
-        low = msg.lower()
-        # 把最常见的失败翻译成新人能照做的提示：词典是第 1 步，且它不在 git 仓库里
-        if (isinstance(e, FileNotFoundError) or "no such table" in low
-                or "file is not a database" in low or "unable to open database" in low
-                or "no such file" in low):
-            hint = ("词典缺失或损坏：请按 README 第 1 步，把 dict.sqlite 放到 resources/ECDICT/ 下"
-                    "（约 65 MB，不在 git 仓库里，需从 Releases 下载）")
-        else:
-            hint = ""
-        return {"ok": False, "db": _DB, "error": msg, "hint": hint}
-    return {"ok": True, "db": _DB}   # 带上库路径：测试能识别「我在跟哪个引擎说话」
+        result = {"ok": False, "error": "engine_unavailable"}
+    else:
+        result = {"ok": True}
+    if result['ok']:
+        from .http_security import instance_identity
+        result['instance_id']=instance_identity()
+    return result
 
 
 @app.post("/v1/annotate")
 def annotate(body: AnnotateBody):
-    return get_engine().annotate(body.text, body.page_id, body.session_id or None)
+    return get_engine().annotate(body.text, body.page_id, body.session_id or None,
+                                 max_annotations=body.max_annotations)
 
 
 @app.get("/v1/status")
@@ -108,7 +126,7 @@ class EventBody(BaseModel):
 
 
 @app.post("/v1/event")
-def record_event(body: EventBody):
+def record_event(body: EventBody, request: Request):
     """扩展上报的观察/交互事件（annotation_shown / hover / known_click）。
     注：这是扩展的内部通道，第 1 批会并入 /v1/cap/* 能力面（同一套守门与配额）。"""
     metas = {"page_id": body.page_id, "session_id": body.session_id}
@@ -118,7 +136,8 @@ def record_event(body: EventBody):
         metas["page_active_ms"] = body.page_active_ms
     if body.sentence:
         metas["sentence"] = body.sentence
-    return get_engine().record_event(body.type, body.lemma, body.surface, metas)
+    return get_engine().record_event(body.type, body.lemma, body.surface, metas,
+                                     source=request.state.http_identity[0])
 
 
 class PersonaBody(BaseModel):
@@ -163,7 +182,7 @@ def _start_scheduler():
 
 
 @app.get("/v1/ext/stream")
-def ext_stream(key: str = ""):
+def ext_stream():
     """SSE 推送：say / hint / param_changed / decision_reverted。
 
     没有这条通道，角色就不可能主动说话——proactivity 参数也就没有意义。
@@ -220,15 +239,19 @@ def _cap_response(status: int, body: dict):
 
 
 @app.post("/v1/cap/{name}")
-def cap_call_post(name: str, body: dict = Body(default={}), x_pae_key: str = Header(default="")):
+def cap_call_post(name: str, request: Request, body: dict = Body(default={})):
     """统一能力入口（内置 companion 与外部智能体同一条路）。"""
-    status, payload = capsurface.handle(name, body or {}, x_pae_key)
+    status, payload = capsurface.handle(name, body or {},
+                                         authenticated_identity=request.state.http_identity)
     return _cap_response(status, payload)
 
 
 @app.get("/v1/cap/{name}")
-def cap_call_get(name: str, x_pae_key: str = Header(default="")):
-    status, payload = capsurface.handle(name, {}, x_pae_key)
+def cap_call_get(name: str, request: Request):
+    if name not in capsurface.HTTP_READ_CAPS:
+        return _cap_response(405, {"ok": False, "error": "capability_requires_post"})
+    status, payload = capsurface.handle(name, {},
+                                         authenticated_identity=request.state.http_identity)
     return _cap_response(status, payload)
 
 
@@ -283,24 +306,15 @@ def persona_save(body: PersonaBody):
 @app.post("/v1/persona/say")
 def persona_say(body: SayBody):
     """用当前人格试说一句（面板的即时反馈）。"""
-    p = body.params or persona_mod.load_params()
-    sys_prompt = persona_mod.render(p, context_block=body.context_block)
-    t0 = time.time()
-    try:
-        r = llm_mod.chat(
-            [{"role": "system", "content": sys_prompt},
-             {"role": "user", "content": body.stimulus or "（没有输入，随便说一句）"}],
-            temperature=0.7, timeout=90)
-        return {"reply": r["content"], "elapsed_ms": int((time.time() - t0) * 1000),
-                "model": r.get("model"), "usage": r.get("usage")}
-    except Exception as e:
-        return {"reply": "", "elapsed_ms": int((time.time() - t0) * 1000),
-                "error": "%s: %s" % (type(e).__name__, str(e)[:200])}
+    status, payload = capsurface.handle("pae.persona.say", body.model_dump(), actor_hint="local")
+    if status != 200:
+        return _cap_response(status, payload)
+    return payload["result"]
 
 
 @app.get("/v1/config")
 def config():
     """只读配置视图（排障用；改配置编辑 config.json 后重启引擎）。"""
-    return load_config()
+    return config_projection(load_config())
 
 # 启动: uvicorn pae_core.api:app --port 4815

@@ -121,6 +121,14 @@
       "sha256": "505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf",
       "url": "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl",
       "metadata_url": "https://pypi.org/pypi/uvicorn/0.54.0/json"
+    },
+    {
+      "name": "certifi",
+      "version": "2026.10.18",
+      "filename": "certifi-2026.10.18-py3-none-any.whl",
+      "sha256": "73191c47aaa79da394e8fee2dbc2ec827432cab56311122c9e47abf79e390f62",
+      "url": "https://files.pythonhosted.org/packages/08/ba/95dd616042484f7c83a06974388b37b837732740ee70bc5dc715b5fcd55a/certifi-2026.10.18-py3-none-any.whl",
+      "metadata_url": "https://pypi.org/pypi/certifi/2026.10.18/json"
     }
   ]
 }

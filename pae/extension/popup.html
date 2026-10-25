@@ -1,20 +1,9 @@
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OpenGloss</title>
 <style>
-  body { width: 220px; font: 13px system-ui, sans-serif; padding: 10px; }
-  #state { font-weight: 600; margin-bottom: 8px; }
-  button { width: 100%; padding: 6px 0; cursor: pointer; }
-  .on { background: #409eff; color: #fff; border: none; }
-  .off { background: #eee; color: #333; border: 1px solid #ccc; }
-  .hint { margin-top: 8px; color: #888; font-size: 11px; }
-</style>
-</head>
-<body>
-<div id="state">PAE</div>
-<button id="pae-toggle">…</button>
-<div class="hint">Engine: <span id="eng">…</span></div>
-<script src="popup.js"></script>
-</body>
-</html>
+*{box-sizing:border-box}body{margin:0;width:320px;padding:20px;background:#f7f8f4;color:#243a31;font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif}header{display:flex;align-items:center;gap:10px}header img{width:36px;height:36px}h1{margin:0;font-size:21px}header p{margin:0;color:#68766e;font-size:12px}#eng{padding:12px;border-radius:10px;background:#e8eee8;font-size:13px;overflow-wrap:anywhere}#eng[data-state=error]{background:#fff0de;color:#855019}button,a{font:inherit}button{width:100%;margin:0 0 10px;padding:11px;border:1px solid #ced9d0;border-radius:9px;background:#fff;color:#244a37;cursor:pointer}#open-sidebar{background:#315d46;color:#fff;border-color:#315d46}button:focus-visible,a:focus-visible{outline:3px solid #d5ae52;outline-offset:3px}nav{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #d9e1d9;padding-top:12px}a{color:#315d46;text-decoration:none}small{display:block;margin-top:14px;color:#68766e;font-size:12px}#retry{padding:4px 0;border:0;background:none;color:#526b5b;font-size:12px}
+</style><script src="popup.js" defer></script></head>
+<body><header><img src="icon-48.png" alt=""><div><h1>OpenGloss</h1><p>照常阅读，需要时再展开。</p></div></header>
+<p id="eng" role="status">正在检查本机服务…</p><button id="open-sidebar">打开当前网页的阅读侧栏</button><button id="pae-toggle" aria-pressed="true">读取标注状态…</button><button id="retry">重新检查服务</button>
+<nav><a id="open-manager" target="_blank" rel="noopener">管理页面</a><a id="open-persona" target="_blank" rel="noopener">人格设置</a></nav>
+<small>无需填写连接设置。网页右下角也有 OpenGloss 入口。刚加载扩展时，刷新已打开的英文网页即可。</small></body></html>

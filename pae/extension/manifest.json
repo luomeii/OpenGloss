@@ -1,15 +1,58 @@
 {
   "manifest_version": 3,
   "name": "OpenGloss",
-  "version": "0.3.0",
+  "version": "0.5.0.4",
   "description": "读英文网页时自动标注生词，词汇在阅读里自然积累（本地优先，零遥测）",
-  "permissions": ["storage", "scripting"],
-  "action": { "default_popup": "popup.html" },
-  "host_permissions": ["http://127.0.0.1:4815/*", "<all_urls>"],
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["content.js"],
-    "run_at": "document_idle"
-  }],
-  "background": { "service_worker": "sw.js" }
+  "permissions": [
+    "storage",
+    "scripting",
+    "alarms"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "OpenGloss · 阅读辅助",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png",
+      "48": "icon-48.png"
+    }
+  },
+  "host_permissions": [
+    "http://127.0.0.1:4815/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "version_name": "0.5.0-rc.4",
+  "web_accessible_resources": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "resources": [
+        "companion.html"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  }
 }

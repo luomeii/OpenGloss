@@ -83,14 +83,22 @@
   </div>
 </div>
 <script>
+function panelFetch(url, options){
+  if(typeof url!=='string'||url.indexOf('/v1/')!==0)return Promise.reject(new Error('请求地址无效'));
+  options=options||{};
+  return fetch(url,Object.assign({},options,{credentials:'omit',redirect:'error'}));
+}
+function panelJson(response){
+  if(!response.ok)throw new Error('请求失败，请检查本机服务状态');
+  return response.json().then(function(j){if(j.ok===false||j.result&&j.result.ok===false)throw new Error('请求未完成，请检查参数或限额');return j;});
+}
 var TRAITS = ['warmth','verbosity','humor','formality','proactivity'];
 var TLABEL = { warmth:'温度', verbosity:'话量', humor:'幽默', formality:'正式度', proactivity:'主动度' };
 var P = null, tmr = null;
 
 function el(id){ return document.getElementById(id); }
 function post(url, body){
-  return fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
-    .then(function(r){ return r.json(); });
+  return panelFetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }).then(panelJson);
 }
 
 function buildTraits(){
@@ -163,7 +171,7 @@ function preview(){
       el('prompt').textContent = j.prompt || '';
       var b = j.bands || {};
       TRAITS.forEach(function(k){ if (b[k]) el('b_' + k).textContent = b[k]; });
-    });
+    }).catch(function(){el('prompt').textContent='预览更新失败，请检查本机服务和输入';});
   }, 260);
 }
 
@@ -185,29 +193,31 @@ el('addForbidden').addEventListener('click', function(){
   P.forbidden = P.forbidden || [];
   P.forbidden.push(''); renderList('forbidden', P.forbidden); preview();
 });
-el('save').addEventListener('click', function(){
+el('save').addEventListener('click', function(event){
+  if(!event.isTrusted||!P)return;
   sync();
   post('/v1/persona', { params: P }).then(function(j){
-    el('saveStatus').textContent = j.ok ? ('已保存 → ' + j.saved_to) : ('校验未过：' + (j.issues || []).join('; '));
-  });
+    el('saveStatus').textContent = j.ok ? '已保存' : '校验未通过，请检查输入';
+  }).catch(function(){el('saveStatus').textContent='保存失败，请检查本机服务和输入';});
 });
-el('say').addEventListener('click', function(){
+el('say').addEventListener('click', function(event){
+  if(!event.isTrusted||!P)return;
   sync();
   el('sayStatus').textContent = '思考中…';
   el('reply').textContent = '…';
   post('/v1/persona/say', { params: P, stimulus: el('stimulus').value, context_block: el('ctx').value })
     .then(function(j){
-      el('reply').textContent = j.reply || j.error || '（无回复）';
+      el('reply').textContent = j.reply || '（无回复）';
       el('sayStatus').textContent = j.elapsed_ms ? (j.elapsed_ms + ' ms') : '';
-    });
+    }).catch(function(){el('sayStatus').textContent='试说失败，请检查模型配置、限额和引擎状态';el('reply').textContent='未获得已确认回复';});
 });
 
 buildTraits();
 bindBasics();
-fetch('/v1/persona').then(function(r){ return r.json(); }).then(function(j){
+panelFetch('/v1/persona').then(panelJson).then(function(j){
   P = j.params; P.quirks = P.quirks || []; P.forbidden = P.forbidden || [];
   fill(); preview();
-});
+}).catch(function(){el('prompt').textContent='人格加载失败：请检查本实例本机服务状态';});
 </script>
 </body>
 </html>

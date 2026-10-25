@@ -2,7 +2,7 @@
 name: pae-bridge
 description: 接入用户本地的 PAE 英语习得引擎（localhost:4815）。当任务涉及英文阅读/写作、
   用户英语学习状态、或需要按他的学习数据调整辅助强度时使用。
-metadata: { pae_api: "0.3" }
+metadata: { pae_api: "0.5.0" }
 ---
 
 # PAE Bridge
@@ -43,12 +43,11 @@ PAE 是用户本机的一个**被动英语习得引擎**：他平时读英文技
 
 ## 能力清单（下表为常用项快照；权威全量清单见 `pae/capabilities.json`，共 42 项 = 41 实现 + 1 如实标注未实现）
 
-### 只读（随便用）
+### 读取（需 read scope，显式刷新另需 write）
 
 | 能力 | 作用 |
 |---|---|
 | `pae.health` | 引擎存活检查 |
-| `pae.annotate` | 给一段文本返回注解（含记账：写入 encounter 事件） |
 | `pae.status` | 学习状态总览（事件数/词表规模/高频掌握词） |
 | `pae.config` | 当前生效配置（只读） |
 | `pae.persona` | 读取人格参数与渲染后的提示词——外部智能体扮演同一角色所必需 |
@@ -68,18 +67,19 @@ PAE 是用户本机的一个**被动英语习得引擎**：他平时读英文技
 | `pae.audit` | 调用审计：谁调用了哪项能力、成功与否（含被拒的尝试）——「哪个智能体在动我的系统」 |
 | `pae.permissions` | 权限矩阵：每个 actor 能做什么、限制是什么（校准结果摆出来，用户可查） |
 | `pae.agent.schedule` | AI 主动巡检的调度状态（是否开启、上次何时跑、今天几次、下次该不该跑） |
-| `pae.outcomes` | **结果侧指标（尺子）**：至少 eval_days 天前被注解过的词里，后来真的点过「认识了」的比例；并回填每次参数变更的前后效果 |
-| `pae.familiarity` | 熟悉度投影（35号）：谁会被「无视即熟悉」豁免、为什么；默认 shadow 模式（只记录不生效） |
+| `pae.outcomes` | 结果侧指标；默认纯读取，evaluate_decisions=true 会回填效果，另需 write |
+| `pae.familiarity` | 熟悉度投影；默认纯读取，recompute=true 另需 write；默认 shadow 不改变上屏 |
 
 ### 写（有守门与配额）
 
 | 能力 | 作用 | 限制 |
 |---|---|---|
-| `pae.event` | 上报观察/交互事件（annotation_shown / hover / known_click）——三证据的发射口 | — |
+| `pae.annotate` | 注解并写入 encounter 事件 | write scope，POST |
+| `pae.event` | 上报 annotation_shown / hover 并持久化认证来源 | 外部及 companion 禁止通用 known_click/user_pin/user_mastered，掌握操作走 pae.pin |
 | `pae.persona.update` | 保存人格参数（本机面板用；外部 actor 走同一守门） | 只能微调 5 个情绪轴，单轴±0.05、同轴 7 天冷却、距种子值≤0.25；身份字段禁改 |
 | `pae.persona.say` | 用当前人格说一句（面板试说/主动推送都走这里） | — |
 | `pae.propose` | 参数变更提案（JSON Patch 方言 + 依据清单；走三层守门，可回滚） | 必须带 ttl_days；高影响变量步长≤20% 且每天 1 次；自我约束项只能调低 |
-| `pae.pin` | 标记「认识了」（写 user_pin/known_click 事件） | AI 每天 ≤20（批量标记会静默关掉注解） |
+| `pae.pin` | 标记「认识了」（写 user_pin 事件） | AI 每天 ≤20（批量标记会静默关掉注解） |
 | `pae.remember` | 写一条长期记忆（必须带 evidence，无证据不收） | evidence 必填；active ≤5；淘汰优先淘汰 AI 自己写的 |
 | `pae.forget` | 撤销一条记忆（superseded_by 语义，不物理删除） | 不能抹掉用户写的事实 |
 | `pae.say` | 往页面推一条角色消息（受 proactivity 与每日上限约束） | 受 daily_say_cap 限制（AI 只能调低） |
@@ -125,7 +125,15 @@ PAE 是用户本机的一个**被动英语习得引擎**：他平时读英文技
 | HTTP | `GET /v1/cap/manifest` 拿清单；`POST /v1/cap/{name}` 调用 |
 | 本 SKILL | 你正在读的就是（由同一份清单生成，能力一致） |
 
-鉴权：不带头 = 本机用户（最高权限）；外部智能体用 `X-PAE-Key`（用户签发）。
+本机访问（0.5.0-rc.3）：普通本机使用无需口令或配对。仅支持回环单用户模式，不能隔离同一系统用户下的其他程序。
+
+- 既有外部 actor key 可通过 MCP 的 `PAE_KEY` 或 HTTP 的 `X-PAE-Key` 显式选择受限身份。未知、空值或重复的 actor key 拒绝，不从参数 `actor` 推断授权。
+- 省略 key 是本机用户身份，因此它不是同机恶意进程的安全边界。不要把本工具暴露到公网或当多租户服务。
+- MCP 不读取或生成 root 配对文件。`PAE_BASE` 只能是精确 `http://127.0.0.1:端口`，禁止路径、用户信息、查询和片段；不使用代理或跟随重定向。请求保留原 180 秒超时，响应最多 32 MiB。
+- `local`、`user`、`companion` 是保留内部身份，不能签发为外部 key；旧同名 key 也拒绝。
+- GET 能力只限清单 allowlist；`pae.context`、`pae.params`、`pae.outcomes`、`pae.familiarity` 通过 POST 默认读纯投影。`pae.annotate` 写事件，需要 write。`pae.config` 递归隐藏秘密字段及 URL 内嵌凭据。
+
+HTTP 示例：`POST /v1/cap/pae.status`，JSON `{}`；若使用显式受限身份，增加 `X-PAE-Key: <actor key>`。SSE 用普通流式 fetch。`read` 可能读取个人历史、记忆和对话，不代表可公开这些内容。
 
 ## 一句话
 
