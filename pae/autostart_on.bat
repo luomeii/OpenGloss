@@ -37,7 +37,7 @@ echo [PAE] launcher content:
 type "%PAE_VBS%"
 echo.
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$q=[char]34; $v='wscript.exe ' + $q + '%PAE_VBS%' + $q; Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'OpenGloss' -Value $v -Force"
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -Command "$q=[char]34; $v='wscript.exe ' + $q + '%PAE_VBS%' + $q; Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'OpenGloss' -Value $v -Force"
 if "%errorlevel%"=="0" goto :pae_ok
 echo [PAE] ERROR: could not write the Run key.
 pause

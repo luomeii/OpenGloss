@@ -15,22 +15,20 @@ rem     does not catch those -- it would report success.
 rem  3) no pipe and no nested 'exit /b': a failed pipeline aborted the script
 rem     with a bare 255, and an 'exit /b N' that is not the last statement of
 rem     its parenthesised block loses N (cmd parses the block first).
-set "PAE_PY="
-python --version >nul 2>nul
-if "%errorlevel%"=="0" set "PAE_PY=python"
-if defined PAE_PY goto :pae_run
-py --version >nul 2>nul
-if "%errorlevel%"=="0" set "PAE_PY=py"
-if defined PAE_PY goto :pae_run
-echo [PAE] ERROR: python is not usable in this terminal.
-echo        Install Python 3.10+ from python.org and CHECK "Add python.exe to PATH",
-echo        then reopen this window and retry.
-pause
-exit /b 1
+rem Always use the python.exe that ships in this folder. The previous version
+rem resolved python/py from PATH, which fails on a machine without Python and
+rem produces a misleading "install Python" message in a self-contained install.
+set "PAE_PY=%~dp0python.exe"
+if not exist "%PAE_PY%" (
+  echo [PAE] ERROR: python.exe is missing next to this file.
+  echo        Re-extract the complete ZIP and run Install.cmd again.
+  pause
+  exit /b 1
+)
 
 :pae_run
 
-%PAE_PY% "%~dp0backup.py"
+"%PAE_PY%" "%~dp0backup.py"
 rem Compare as a string: backup.py dying from a missing DLL or a crash exits
 rem NEGATIVE, and 'if errorlevel 1' would let that through as success.
 if not "%errorlevel%"=="0" goto :pae_failed
