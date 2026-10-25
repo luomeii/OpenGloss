@@ -49,6 +49,43 @@ OpenGloss 不给你安排任何学习任务。你像平常一样读 GitHub READM
 
 ## 快速开始
 
+两条路，按你的情况选一条。**只是想在浏览器里用，选方式一 —— 不需要碰 Python。**
+
+### 方式一 · 下载离线安装包（推荐，不需要 Python）
+
+从 [Releases](https://github.com/luomeii/OpenGloss/releases/latest) 下载
+`OpenGloss-<版本>-windows-x64-offline.zip`。它已经把 Python 3.12、全部依赖和词典打包好了。
+
+```
+1. 完整解压到长期使用的目录，例如 D:\Apps\OpenGloss
+2. 双击 Install.cmd（约 10 秒，会自动启动引擎并报告成败）
+3. 浏览器加载扩展：<安装目录>\pae\extension
+4. 打开任意英文网页
+```
+
+加载扩展：Chrome 打开 `chrome://extensions`，Edge 打开 `edge://extensions`，
+开启「开发者模式」→「加载已解压的扩展程序」→ 选上面那个 `pae\extension` 文件夹。
+
+**首次启动要加载 65 MB 词典**：普通机器 10–25 秒，虚拟机或低配机器可能 1–2 分钟。
+窗口里出现 `[PAE] engine ready: http://127.0.0.1:4815/v1/health` 就是好了，不要中途关窗口。
+
+安装目录里会有四个快捷方式：
+
+| 文件 | 作用 |
+|---|---|
+| `quick_start.lnk` | 启动引擎 |
+| `quick_stop.lnk` | 关闭引擎 |
+| `autostart_on.lnk` | 注册开机自启（当前用户，不需要管理员权限） |
+| `autostart_off.lnk` | 取消开机自启 |
+
+> 离线包是**原地安装**：不写 `%LOCALAPPDATA%`、不修改系统 PATH、不写注册表（除非你主动开启自启）、
+> 不创建桌面快捷方式、不修改浏览器设置。整个程序就在你解压的那个文件夹里，挪位置也能用。
+> 引擎固定使用 4815 端口，同一台机器上只运行一个实例。
+
+---
+
+### 方式二 · 从源码运行（需要 Python；改代码或非 Windows 用这条）
+
 需要 Python 3.10+。引擎内核纯标准库；API 层依赖 fastapi/pydantic/uvicorn（`pip install -r requirements.txt`）。
 
 > ⚠️ **装 Python 时请勾选 Add python.exe to PATH**（官方安装器**默认不勾**）。忘了勾的话，四个 `.bat` 会直接报错提示你，不会假装成功——但引擎起不来。
