@@ -37,6 +37,11 @@ try {
             throw ('Integrity check failed: ' + $relative + '. Extract a fresh complete ZIP; existing data was not changed.')
         }
     }
+    # Strip the mark-of-the-web from everything we shipped. Files taken out of a
+    # downloaded ZIP carry a Zone.Identifier stream, and Windows then shows the
+    # "Open File - Security Warning" dialog whenever a .bat is ShellExecuted. At
+    # logon nobody can click Run, so the engine would never start.
+    Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue | ForEach-Object { try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { } }
     $pae = Join-Path $root 'pae'
     $python = Join-Path $pae 'python.exe'
     $names = @('quick_start', 'quick_stop', 'autostart_on', 'autostart_off')
