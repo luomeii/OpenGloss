@@ -74,7 +74,7 @@ print('[OpenGloss] Bundled Python, dependencies and dictionary are ready.')
     # 0.4/0.5 installers did. This is NOT fatal: if the engine cannot start the
     # files are still correctly installed, and the reason is printed.
     Write-Host ''
-    Write-Host '[OpenGloss] Installation ready in: ' + $root
+    Write-Host ('[OpenGloss] Installation ready in: ' + $root)
     $starter = Join-Path $pae 'start_engine.ps1'
     if (Test-Path -LiteralPath $starter) {
         Write-Host '[OpenGloss] Starting the engine now...'
