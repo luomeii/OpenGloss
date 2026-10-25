@@ -70,9 +70,23 @@ print('[OpenGloss] Bundled Python, dependencies and dictionary are ready.')
         $shortcut.WorkingDirectory = $pae
         $shortcut.Save()
     }
+    # Start the engine now so the install is immediately usable, the way the
+    # 0.4/0.5 installers did. This is NOT fatal: if the engine cannot start the
+    # files are still correctly installed, and the reason is printed.
     Write-Host ''
-    Write-Host ('[OpenGloss] Installation ready in: ' + $root)
-    Write-Host '[OpenGloss] Double-click quick_start.lnk to start the original engine.'
+    Write-Host '[OpenGloss] Installation ready in: ' + $root
+    $starter = Join-Path $pae 'start_engine.ps1'
+    if (Test-Path -LiteralPath $starter) {
+        Write-Host '[OpenGloss] Starting the engine now...'
+        & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -ExecutionPolicy Bypass -File $starter
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host '[OpenGloss] Engine is running. Open an English page and reload the extension.'
+        } else {
+            Write-Host '[OpenGloss] The files are installed, but the engine did not start.'
+            Write-Host '[OpenGloss] Read the messages above, then try quick_start.lnk.'
+        }
+    }
+    Write-Host '[OpenGloss] You can also start it later with quick_start.lnk.'
     Write-Host ('[OpenGloss] Manually load the browser extension from: ' + (Join-Path $pae 'extension'))
     Write-Host '[OpenGloss] Autostart remains OFF unless you enable it yourself.'
     Write-Host '[OpenGloss] No system PATH, registry, desktop or browser settings were changed.'
