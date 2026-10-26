@@ -78,6 +78,23 @@ OpenGloss 不给你安排任何学习任务。你像平常一样读 GitHub READM
 | `autostart_on.lnk` | 注册开机自启（当前用户，不需要管理员权限） |
 | `autostart_off.lnk` | 取消开机自启 |
 
+#### 开机自启（可选）
+
+**安装器不会自动登记开机自启。** 需要的话，双击安装根目录的 `autostart_on.lnk`：
+
+```
+看到 [PAE] Autostart is ON. The engine will start (hidden) at every logon.
+就生效了。
+```
+
+它做两件事：写当前用户的注册表 `Run` 项（**不需要管理员权限**），并在 `pae/` 里生成一个隐藏启动器
+`autostart_hidden.vbs`。登录时引擎在后台拉起，全程无窗口，也不会弹任何对话框。
+
+不需要了，双击 `autostart_off.lnk` 撤销（会一并删掉那个启动器）。
+
+如果某次开机后引擎没起来，看 `pae\autostart.log` —— 里面有完整的启动记录和失败原因。
+
+> 启动器以自身所在目录定位，所以**整个安装目录挪位置或改名后仍然有效**，不需要重新登记自启。
 > 离线包是**原地安装**：不写 `%LOCALAPPDATA%`、不修改系统 PATH、不写注册表（除非你主动开启自启）、
 > 不创建桌面快捷方式、不修改浏览器设置。整个程序就在你解压的那个文件夹里，挪位置也能用。
 > 引擎固定使用 4815 端口，同一台机器上只运行一个实例。
@@ -144,7 +161,7 @@ start_engine.bat        # 或: python -m uvicorn pae_core.api:app --port 4815
 | `autostart_off.bat` | **取消开机自启**：删掉注册表项与它生成的启动器，安全、可重复执行 |
 
 > 前两个只是调用已有的 `start_engine.bat` / `stop_engine.bat`，没有新的启动逻辑。
-> 文件夹挪位置或改名后，重新跑一次 `autostart_on.bat` 即可（它记的是绝对路径）。
+> 启动器以自身所在目录定位，整个目录挪位置或改名后依然有效。
 > 四个文件都是纯 ASCII，**可以随意改名**（它们用 `%~dp0` 定位自己）。
 
 ### 3. 装浏览器扩展
