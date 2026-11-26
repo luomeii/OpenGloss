@@ -101,7 +101,7 @@ def _log(conn, kind, payload, actor, blocked=False, reason="", ts=None):
         conn.commit()
 
 
-def say(conn, actor, text, anchor="", cap=None, meta=None, ts=None):
+def say(conn, actor, text, anchor="", cap=None, meta=None, ts=None, guard_engine=None):
     """往页面说一句。受每日上限约束（默认取 params 的 daily_say_cap）。
 
     meta：附加到推送事件与日志 payload 里的标签（主动说话用它标记 proactive=true，
@@ -119,6 +119,8 @@ def say(conn, actor, text, anchor="", cap=None, meta=None, ts=None):
     # M5 修复（评审 2026-10-03）：count 与 insert 必须同一把锁，否则双线程并发
     # 各自读到 n<cap → 双发（超发配额）。锁与 _log 同源（引擎锁），单线程退无锁。
     with _write_lock(conn):
+        if guard_engine is not None and getattr(guard_engine, '_learning_write_fault', False):
+            return False, {"error": "learning_write_paused", "restart_required": True}
         n = today_count(conn, "say", now=ts)
         if n >= cap:
             conn.execute("INSERT INTO push_log(ts, kind, payload, actor, blocked, reason)"
@@ -186,7 +188,7 @@ def log(conn, n=20, kind=None):
 #   push.say → BUS → GET /v1/ext/stream(SSE) → sw.js paeBroadcast → content.js PAE_PUSH → 角色壳
 # 但引擎侧**没有任何生产者会自发 emit say**：唯一入口 pae.say 是能力面调用（要外部调用者），
 # agent.tick 是真实 LLM 且 agent_schedule.enabled 默认 false。
-# 当时实测：两天使用量下 push_log 0 行、agent_log 0 行 → 她一次都没主动开口。
+# 主动提醒需要引擎侧触发源；仅有消息传递链路不代表会自行发出提醒。
 #
 # 触发条件（**全部**满足才发，逐条对应产品要求）：
 #   ① 自上次主动说话以来，新曝光（events.type='encounter'）累计 ≥ PROACTIVE_MIN_EXPOSURES(120)
@@ -206,19 +208,17 @@ def log(conn, n=20, kind=None):
 # 同一个每日上限、同一份 push_log 审计，用户侧与手动 say 完全无法区分待遇差别。
 # 评估节流：annotate 里每 PROACTIVE_EVAL_INTERVAL_S(300) 秒最多真正评估一次（纯 SQL，开销可忽略）。
 # ---------------------------------------------------------------------------
-# 2026-10-03 二次反馈：120 次 + 2 小时太难触发（两天实际使用一次都没见过）→ 60 次 + 45 分钟。
-# 三次反馈：一天只见到了 1 次，想再多一点 → 45 次 + 30 分钟。
+# 主动提醒由下方接触次数阈值、最小间隔和每日上限共同约束。
 # 真正的安全阀是日上限（3 条 + 其中 LLM ≤2 条）：阈值只决定「今天这 3 条多早出现」，不会变多。
 PROACTIVE_MIN_EXPOSURES = 45
 PROACTIVE_MIN_GAP_S = 30 * 60
 PROACTIVE_DAILY_MAX = 3
 PROACTIVE_EVAL_INTERVAL_S = 300
-PROACTIVE_TEMPLATE = "%s 见了 %d 次了，快出带了"
+PROACTIVE_TEMPLATE = "%s 有 %d 次系统选中记录，可以顺手回顾一下"
 
 # ---------------------------------------------------------------------------
-# LLM 版主动说话（2026-10-03 二次反馈）：用户反馈「始终只有正则式规则对话，太单调，
-# 真正调用说话的智能在哪」。规则版保留兜底，命中触发时优先让 LLM 带着**她的人格 +
-# 近期对话上下文**说一句（这才是"真的在说话"）；LLM 失败/超额一律退回模板句，零风险。
+# 主动说话可使用人格与近期对话上下文生成LLM回复；
+# 调用失败或超额时回退模板句，是否允许调用仍由既有许可检查决定。
 # 限流：每天最多 PROACTIVE_LLM_DAILY_MAX(2) 条走 LLM（真实花费，宁少勿多）；
 # config.json 的 proactive_llm=false 可整体关掉（测试也用它做确定性隔离）。
 # ---------------------------------------------------------------------------
@@ -265,8 +265,9 @@ def _proactive_llm_text(conn, picked):
     n_enc = int(picked.get("encounters") or 0)
     s_val = float(picked.get("s_value") or 0.0)
     gloss = str(picked.get("gloss") or "")
-    cb = ("用户正在读英文网页。词 \"%s\"%s 已遇到 %d 次、熟悉度 S≈%.2f，快出学习带了。"
-          % (lemma, ("（释义：%s）" % gloss[:60]) if gloss else "", n_enc, s_val))
+    cb = ("用户正在读英文网页。词 \"%s\"%s 有 %d 次系统选中记录，可回顾。"
+          "选中不证明看见或学会，不能据此宣称熟悉或快出学习带。"
+          % (lemma, ("（释义：%s）" % gloss[:60]) if gloss else "", n_enc))
     sysp = persona_mod.render(p, context_block=cb)
     history = []
     for t in (mem_mod.recent(conn, None, 8) or []):
@@ -278,7 +279,8 @@ def _proactive_llm_text(conn, picked):
             + [{"role": "user", "content":
                 "请用一两句中文随口跟用户提一下这个词（可以带点释义或它在页面里的用法感觉），"
                 "像顺手帮个忙。不要报任何数字，别说教，不打断阅读节奏，最多两句。"}])
-    r = llm_mod.chat(msgs, temperature=0.8, timeout=12, max_tokens=200)
+    r = llm_mod.chat(msgs, temperature=0.8, timeout=12, max_tokens=200,
+                     purpose="proactive")
     txt = (r.get("content") or "").strip()
     if not txt or len(txt) > 300:
         return None
@@ -339,12 +341,7 @@ def _pick_proactive_word(engine):
     """从「最近在啃」的词里挑 S 涨得最快的（规则排序，不调 LLM）。挑不出返回 None。"""
     from . import observe as obs_mod
     try:
-        lock = getattr(engine, "lock", None)
-        if lock is not None:
-            with lock:                       # 快照式读取：并发折叠时不会「字典改变大小」
-                words = obs_mod.band_words(engine, PROACTIVE_POOL_SIZE)
-        else:
-            words = obs_mod.band_words(engine, PROACTIVE_POOL_SIZE)
+        words = obs_mod.band_words(engine, PROACTIVE_POOL_SIZE)
     except Exception:
         return None
     pool = [w for w in words if int(w.get("encounters") or 0) >= 3 and not w.get("known_click")]
@@ -371,6 +368,12 @@ def maybe_proactive(conn, engine=None, now=None):
     """
     now = int(now if now is not None else time.time())
     try:
+        if engine is not None and getattr(engine, '_learning_write_fault', False):
+            return _proactive_result(False, "learning_write_paused", now)
+        from . import user_controls
+        controls = user_controls.load()
+        if not controls["proactive_enabled"]:
+            return _proactive_result(False, "disabled", now)
         if now - float(_PROACTIVE_STATE.get("last_eval") or 0.0) < PROACTIVE_EVAL_INTERVAL_S:
             return {"sent": False, "reason": "eval_throttled", "skipped": "eval_throttled", "now": now}
         _PROACTIVE_STATE["last_eval"] = now
@@ -383,11 +386,14 @@ def maybe_proactive(conn, engine=None, now=None):
         if today_count(conn, "say", now=now) >= cap:                         # 条件 ④
             return _proactive_result(False, "quota", now, cap=cap)
         last = _last_proactive_ts(conn)
-        if last and now - int(last) < PROACTIVE_MIN_GAP_S:                   # 条件 ②
+        min_gap_s = max(PROACTIVE_MIN_GAP_S,
+                        int(controls["proactive_gap_minutes"]) * 60)
+        if last and now - int(last) < min_gap_s:                              # 条件 ②
             return _proactive_result(False, "gap", now, last_proactive_ts=int(last),
-                                     wait_s=PROACTIVE_MIN_GAP_S - (now - int(last)))
-        exposures = int(conn.execute("SELECT COUNT(*) FROM events WHERE type='encounter' AND ts > ?",
-                                     (int(last or 0),)).fetchone()[0])
+                                     wait_s=min_gap_s - (now - int(last)))
+        exposures = int(conn.execute(
+            "SELECT COUNT(*) FROM events WHERE type IN ('encounter','contact_selected_v1') AND ts > ?",
+            (int(last or 0),)).fetchone()[0])
         if exposures < PROACTIVE_MIN_EXPOSURES:                              # 条件 ①
             return _proactive_result(False, "few_exposures", now, exposures=exposures,
                                      need=PROACTIVE_MIN_EXPOSURES)
@@ -412,8 +418,11 @@ def maybe_proactive(conn, engine=None, now=None):
                 "s_value": picked.get("s_value")}
         if used_llm:
             meta["llm"] = 1
-        ok, body = say(conn, "companion", text, anchor=lemma, meta=meta, ts=now)
-        return _proactive_result(bool(ok), "sent" if ok else "say_failed", now,
+        ok, body = say(conn, "companion", text, anchor=lemma, meta=meta, ts=now,
+                       guard_engine=engine)
+        reason = "sent" if ok else ("learning_write_paused" if body.get("error") ==
+                                   "learning_write_paused" else "say_failed")
+        return _proactive_result(bool(ok), reason, now,
                                  exposures=exposures, text=text, lemma=lemma,
                                  llm=used_llm, body=body)
     except Exception as e:   # 绝不因为「她想说话」把注解主链路拖垮

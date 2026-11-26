@@ -1,4 +1,4 @@
-# Offline, in-place setup only. Does not launch or stop any engine.
+# Offline, in-place setup; attempts to start the packaged engine after validation.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 try {

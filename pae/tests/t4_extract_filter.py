@@ -183,14 +183,6 @@ def wait_health(timeout=40):
     return False
 
 
-def read_debug(page):
-    raw = page.evaluate("document.documentElement.dataset.paeDebug || ''")
-    try:
-        return json.loads(raw) if raw else {}
-    except Exception:
-        return {"_raw": raw[:200]}
-
-
 def post_annotate(text, page_id, session_id=None):
     body = json.dumps({"text": text, "page_id": page_id,
                        "session_id": session_id or ""}).encode("utf-8")
@@ -214,20 +206,16 @@ def run_browser_checks(results):
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(FIXTURE.as_uri())
 
-        dbg = {}
+        highlight_count_js = "() => CSS.highlights?.get('pae-word')?.size ?? -1"
         for _ in range(60):   # 引擎冷启动加载词典 ~15s
             page.wait_for_timeout(1000)
-            dbg = read_debug(page)
-            if dbg.get("annotations", -1) not in (-1, None):
+            if page.evaluate(highlight_count_js) > 0:
                 break
         page.wait_for_timeout(1500)   # 等高亮注册完成
 
-        results["debug"] = dbg
         results["legacy_nodes"] = page.evaluate(LEGACY_NODES_JS)
         results["highlights"] = page.evaluate(HIGHLIGHT_JS)
-        results["highlight_ranges"] = page.evaluate(
-            "(() => { try { const h = CSS.highlights && CSS.highlights.get('pae-word');"
-            " return h ? h.size : -1; } catch (e) { return -2; } })()")
+        results["highlight_ranges"] = page.evaluate(highlight_count_js)
         results["page_errors"] = len(errors)
         results["errors"] = errors[:3]
         ctx.close()

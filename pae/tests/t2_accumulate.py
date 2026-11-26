@@ -81,20 +81,17 @@ def wait_health(t=60):
     return False
 
 
-def read_dbg(page):
-    raw = page.evaluate("document.documentElement.dataset.paeDebug || ''")
-    try:
-        return json.loads(raw) if raw else {}
-    except Exception:
-        return {}
-
-
 def hl_state(page):
     return page.evaluate("""() => {
       const h = (CSS.highlights && CSS.highlights.get('pae-word'));
-      if (!h) return { size: 0, texts: [] };
-      const arr = []; h.forEach(r => arr.push(r.toString()));
-      return { size: h.size, texts: arr };
+      const texts = [], injected = [];
+      const container = document.getElementById('inject');
+      if (h) h.forEach(range => {
+        const text = range.toString().trim();
+        texts.push(text);
+        if (container.contains(range.startContainer)) injected.push(text);
+      });
+      return { size: texts.length, texts, injected };
     }""")
 
 
@@ -127,27 +124,25 @@ try:
         page.goto(FIX.as_uri())
         s1 = wait_for(page, lambda s: s['size'] > 0)
         assert s1, 'batch 1 produced no highlight'
-        dbg1 = read_dbg(page)
-        b1_surfaces = [a['surface'] for a in (dbg1.get('lastResponse') or [])]
+        b1_surfaces = s1['texts']
         result['batch1'] = {'size': s1['size'], 'surfaces': b1_surfaces}
 
         # 第二批：注入全新段落（不同词，确保是新 range 而不是重复）
         js = ''.join(["document.getElementById('inject').innerHTML = ",
                        "\"<p>" + 'A ubiquitous tenacious meticulous redundant ambiguity persisted.</p>'.replace("'", "") + "\";"])
         page.evaluate(js)
-        s2 = wait_for(page, lambda s: s['size'] > s1['size'], t=45)
-        dbg2 = read_dbg(page)
+        s2 = wait_for(page, lambda s: s['size'] > s1['size'] and s['injected'], t=45)
         result['batch2'] = {'size': s2['size'] if s2 else -1,
-                            'rendered_field': (dbg2.get('rendered') or {}),
-                            'surfaces': [a['surface'] for a in (dbg2.get('lastResponse') or [])]}
+                            'surfaces': s2['injected'] if s2 else []}
 
         # 断言1：累积（第二批之后总量 = 第一批 + 新增）
         accum_ok = bool(s2) and s2['size'] > s1['size']
         # 断言2：第一批的词仍然有高亮（这就是「第一批全消失」的回归点）
-        still = [w for w in b1_surfaces if any(w == t.strip() for t in (s2['texts'] if s2 else []))]
+        original_texts = s2['texts'] if s2 else []
+        still = [w for w in b1_surfaces if w in original_texts]
         result['batch1_words_still_highlighted'] = still
         result['accumulation_ok'] = accum_ok
-        result['first_batch_preserved'] = len(still) > 0
+        result['first_batch_preserved'] = len(still) == len(b1_surfaces)
 
         # 断言3：重复调用不产生重复 range（幂等）
         dup = page.evaluate("""() => {

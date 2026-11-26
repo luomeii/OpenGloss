@@ -33,7 +33,12 @@ class InstallationTests(unittest.TestCase):
                      'pae/extension/sw.js': b'original capsule panel sidebar',
                      'pae/quick_start.bat': b'@echo off\r\ncd /d "%~dp0"\r\n',
                      'resources/ECDICT/lemma.en.txt': b'word -> word'}
-        for name, data in self.base.items():
+        self.development = {'pae/tests/t13_conformance.py': b'baseline fixture',
+                            'pae/tests/fixtures/nested.html': b'fixture page',
+                            'pae/pae_core/test_engine.py': b'engine unit test',
+                            'requirements-dev.txt': b'pytest'}
+        source_files = self.base | self.development
+        for name, data in source_files.items():
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
@@ -42,11 +47,12 @@ class InstallationTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes((SOURCE / name).read_bytes())
         self.lock = {'schema': 1, 'baseline_commit': 'test-public-baseline',
-                     'baseline_files': {n: digest(d) for n, d in self.base.items()}}
+                     'baseline_files': {n: digest(d) for n, d in source_files.items()}}
         for key, filename, members in (
                 ('runtime', 'python.zip', {'python.exe': b'public runtime',
                                          'python312._pth': b'python312.zip\n.\n'}),
-                ('wheel', 'demo.whl', {'demo/__init__.py': b'value=1\n'})):
+                ('wheel', 'demo.whl', {'demo/__init__.py': b'value=1\n',
+                                       'demo/test_cases.py': b'dependency module'})):
             path = self.cache / filename
             with zipfile.ZipFile(path, 'w') as archive:
                 for name, data in members.items():
@@ -90,6 +96,29 @@ class InstallationTests(unittest.TestCase):
             path.write_bytes(b'private sentinel')
         with zipfile.ZipFile(self.build()) as archive:
             self.assertFalse(any(b'private sentinel' in archive.read(n) for n in archive.namelist()))
+
+    def test_project_development_files_stay_in_source_only(self):
+        with zipfile.ZipFile(self.build()) as archive:
+            names = set(archive.namelist())
+            manifest = json.loads(archive.read('INSTALL-MANIFEST.json'))
+            self.assertTrue(self.development.keys().isdisjoint(names))
+            self.assertTrue(self.development.keys().isdisjoint(manifest['files']))
+            self.assertEqual(archive.read('pae/Lib/site-packages/demo/test_cases.py'),
+                             b'dependency module')
+        for name, data in self.development.items():
+            self.assertEqual((self.source / name).read_bytes(), data)
+
+    def test_excluded_project_development_files_still_require_valid_hashes(self):
+        for name, data in self.development.items():
+            with self.subTest(name=name):
+                path = self.source / name
+                path.write_bytes(b'changed')
+                try:
+                    with self.assertRaisesRegex(ValueError, 'original baseline mismatch'):
+                        self.build()
+                    self.assertFalse((self.root / 'output.zip').exists())
+                finally:
+                    path.write_bytes(data)
 
     def test_modified_original_is_rejected(self):
         (self.source / 'pae/config.json').write_bytes(b'changed')

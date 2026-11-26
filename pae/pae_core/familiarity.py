@@ -12,6 +12,7 @@
 """
 import json
 import time
+from .fold import score_at
 
 RULE_VERSION = 2
 QUALIFIED_PAGE_MS = 1000      # 降级口径：页面活跃 ≥1s 才算「看见了」
@@ -111,7 +112,7 @@ def evaluate(conn, engine_params, states, window_days=WINDOW_DAYS):
     out = {}
     for lemma, s in stats.items():
         st = states.get((lemma, 0))
-        s_value = st.s_value(engine_params) if st is not None else 0.0
+        s_value = score_at(st, engine_params, now)
         reasons = []
         state = "none"
         o = ovr.get(lemma)

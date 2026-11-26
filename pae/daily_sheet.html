@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>今日识单 · OpenGloss</title>
+<style>
+:root { color-scheme:light; --ink:#18362c; --muted:#58685e; --line:#dae6db; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:#eef3ee; font:14px/1.55 system-ui,"Microsoft YaHei",sans-serif; }
+main { max-width:820px; margin:20px auto; padding:26px 32px; background:#fff; }
+h1 { margin:0; font-size:27px; }
+.sub, small, footer { color:var(--muted); }
+form { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:13px 0; }
+input,button { font:inherit; border:1px solid #a7b9ab; border-radius:6px; padding:6px 9px; }
+button { color:#fff; background:#315d43; cursor:pointer; }
+.notice { padding:9px 12px; background:#fff5df; border-left:3px solid #b68a42; }
+.summary { margin:14px 0; font-weight:700; }
+article { border:1px solid var(--line); border-radius:8px; padding:10px 14px; margin:9px 0; break-inside:avoid; }
+article h2 { font-size:18px; margin:0 0 5px; overflow-wrap:anywhere; }
+article p { margin:3px 0; overflow-wrap:anywhere; }
+.hint { font-size:11px; color:#366b49; font-weight:400; }
+.empty { padding:22px 0; color:var(--muted); }
+footer { margin-top:18px; border-top:1px solid var(--line); padding-top:8px; font-size:11px; }
+@page { size:A4; margin:12mm; }
+@media print { body { background:#fff; } main { margin:0; padding:0; } form,.print-button { display:none; } }
+@media (max-width:550px) { main { margin:0; padding:18px; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>今日识单</h1>
+<p class="sub">按本机日期整理的系统记录词</p>
+</header>
+<form action="/daily" method="get"><label for="day">日期</label><input id="day" name="date" type="date" value="$date" required><button type="submit">查看</button></form>
+<p class="notice">记录只表示引擎选中过这个词，不证明你看见、读懂或学会。中文义来自本地词典，未核对网页语境；当前词典没有独立英解和词性。</p>
+<p class="summary">$summary</p>
+<p class="sub">需要纸质版时，可用浏览器的 Ctrl+P 打印。</p>
+$cards
+<footer>$diagnostics 统计的是已持久化且去重后的事件；建议顺序仅供回顾，不改变学习算法。</footer>
+</main>
+</body>
+</html>

@@ -1,10 +1,11 @@
 """PAE fold engine. Spec: 26号算法规格. events -> state (pure function)."""
 import math
+from dataclasses import replace
 from .state import DEFAULTS, WordState
 
 LN2 = math.log(2)
 _OBS_ONLY = {"gloss_cached", "annotation_shown", "chat_turn", "compose",
-             "grammar_shown", "decision_applied", "param_changed"}
+             "grammar_shown", "decision_applied", "param_changed", "visible_opportunity"}
 
 def _clamp(x, lo, hi):
     return lo if x < lo else (hi if x > hi else x)
@@ -13,6 +14,15 @@ def decay(E: float, t_E, t_now: int, half_life_days: float) -> float:
     if E == 0.0 or t_E is None:
         return E
     return E * math.exp(-LN2 * (t_now - t_E) / (half_life_days * 86400.0))
+
+def score_at(st, params: dict, now: int) -> float:
+    """Current score without changing stored evidence or its decay anchor."""
+    if st is None:
+        return 0.0
+    at = max(now, st.t_E) if st.t_E is not None else now
+    projected = replace(st, E=decay(st.E, st.t_E, at, params["half_life_days"]))
+    return projected.s_value(params)
+
 
 def _get_state(states, key) -> WordState:
     if key not in states:

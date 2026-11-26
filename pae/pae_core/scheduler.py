@@ -37,6 +37,9 @@ def should_tick(conn, now=None):
     cfg = config()
     if not cfg.get("enabled"):
         return False, "disabled"
+    from . import user_controls
+    if not user_controls.allowed("scheduled"):
+        return False, "ai_disabled"
     now = int(now or time.time())
     row = conn.execute("SELECT MAX(ts) FROM agent_log").fetchone()
     last = (row or [None])[0] or 0
@@ -49,7 +52,7 @@ def should_tick(conn, now=None):
                          (day_start,)).fetchone()[0]
     if today >= agent_mod.TICK_DAILY_LIMIT:
         return False, "daily_limit"
-    new_events = conn.execute("SELECT COUNT(*) FROM events WHERE ts > ?", (last,)).fetchone()[0]
+    new_events = conn.execute("SELECT COUNT(*) FROM events WHERE ts > ? AND type != 'visible_opportunity'", (last,)).fetchone()[0]
     if new_events < int(cfg.get("min_new_events", 3)):
         return False, "no_new_activity"
     return True, "ok"
@@ -61,7 +64,9 @@ def maybe_tick(conn):
         _state["last_result"] = {"skipped": why, "ts": int(time.time())}
         return {"skipped": why}
     from . import agent as agent_mod
-    out = agent_mod.tick(conn, actor="companion", stimulus=AUTO_STIMULUS)
+    from . import llm as llm_mod
+    with llm_mod.call_purpose("scheduled"):
+        out = agent_mod.tick(conn, actor="companion", stimulus=AUTO_STIMULUS)
     _state["last_result"] = {"ran": True, "ts": int(time.time()), "error": out.get("error"),
                              "actions": [a.get("name") for a in (out.get("actions") or [])]}
     return out

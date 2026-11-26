@@ -48,9 +48,9 @@ def test_t3b_unknown_word_not_annotated(engine):
 
 
 def test_t3c_no_frequency_assumption_by_default(engine):
-    """T3c（2026-10-01 用户策略变更）：默认【不预设已知词】——先全部当不会，慢慢积累。
-
-    所以 comment 这类常见词默认也会被注解；但过滤机制本身仍可用（bnc_known_rank > 0 时生效）。
+    """T3c：默认不按词频预设已知词。
+    
+    comment等常见词默认也可被注解；bnc_known_rank大于0时保留词频过滤。
     """
     import pae_core.engine as eng
     assert BNC_KNOWN_RANK == 0, "默认必须为 0：不做词频假设"

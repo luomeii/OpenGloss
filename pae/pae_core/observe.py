@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """PAE 只读能力：context 装配 / page 现场 / word / events / decisions。
 
-上下文策略（用户 2026-10-01 拍板）：1M 上下文很充裕 → **默认全量装载**，
-只在超过单请求上限时按固定顺序渐进裁剪（先丢最老的对话 → 再丢低置信记忆 → 最后丢低 S 的词）。
+上下文按请求装配，超过单请求预算时按固定顺序渐进裁剪；预算为粗估。
 """
 import json
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from . import metrics as metrics_mod
 from . import persona as persona_mod
+from .fold import score_at
+from .contacts import SELECTED_TYPES
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -31,18 +33,24 @@ def estimate_tokens(obj) -> int:
 
 def band_words(engine, n=40, order="recent"):
     """学习带内（含带下新词）的词，附释义。
-
-    order='recent'（默认；2026-10-02 首日反馈修复）：按最后接触时间 last_seen 降序——
-    侧栏「最近在啃」就该显示最近真碰到的词。旧实现一律按 S 升序，低 S 的旧词永远霸榜，
-    新接触的词挤不进前 n（用户实测：翻了很多页，那几个词还是不变）。
-    order='s'：按 S 升序（最该被关注的在前），保留给「最该关注」语义的旧调用方。
-    同一时间戳（或都没有 last_seen）时用 S 升序兜底，保证顺序稳定、可复现。
+    
+    order='recent'：按最后接触时间 last_seen 降序，优先显示近期接触词。
+    order='s'：按 S 升序，保留按分数查看的调用语义。
+    同一时间戳或均无 last_seen 时，用 S 升序兜底以保持顺序稳定。
     """
-    lo = engine.params.get("band_lo", 0.10)
-    hi = engine.params.get("band_hi", 0.55)
+    with (getattr(engine, "lock", None) or nullcontext()):
+        engine._ensure_learning_writable()
+        states = dict(engine.states)
+        contacts = dict(engine.contacts)
+        effective = dict(engine.params)
+        now = int(time.time())
+    lo = effective.get("band_lo", 0.10)
+    hi = effective.get("band_hi", 0.55)
     items = []
-    for (lemma, sense), st in engine.states.items():
-        s = st.s_value(engine.params)
+    for lemma, sense in dict.fromkeys([*states, *contacts]):
+        st = states.get((lemma, sense))
+        fact = contacts.get((lemma, sense))
+        s = score_at(st, effective, now)
         if s > hi:
             continue  # 已出带，不再占用预算
         entry = engine.translations.get(lemma)
@@ -51,10 +59,12 @@ def band_words(engine, n=40, order="recent"):
             "gloss": (entry[0] if entry else "")[:60],
             "s_value": round(s, 3),
             "below_band": s < lo,
-            "encounters": st.n_enc,
-            "hover": st.n_hover,
-            "known_click": st.n_known,
-            "last_seen": st.t_E,
+            "encounters": fact.count if fact else 0,
+            "hover": st.n_hover if st else 0,
+            "known_click": st.n_known if st else 0,
+            "last_seen": max((t for t in (fact.last_selected if fact else None,
+                                         st.t_E if st else None) if t is not None), default=None),
+            "has_learning_state": st is not None,
         })
     if order == "s":
         items.sort(key=lambda x: x["s_value"])
@@ -67,21 +77,28 @@ def word(engine, lemma: str):
     lemma = (lemma or "").strip().lower()
     if not lemma:
         return {"error": "empty lemma"}
-    st = engine.states.get((lemma, 0))
+    with (getattr(engine, "lock", None) or nullcontext()):
+        engine._ensure_learning_writable()
+        st = engine.states.get((lemma, 0))
+        fact = engine.contacts.get((lemma, 0))
+        effective = dict(engine.params)
+        now = int(time.time())
     entry = engine.translations.get(lemma)
-    s = st.s_value(engine.params) if st else 0.0
-    lo = engine.params.get("band_lo", 0.10)
-    hi = engine.params.get("band_hi", 0.55)
+    s = score_at(st, effective, now)
+    lo = effective.get("band_lo", 0.10)
+    hi = effective.get("band_hi", 0.55)
     return {
         "lemma": lemma,
         "gloss": entry[0] if entry else "",
         "in_dict": bool(entry),
         "s_value": round(s, 3),
         "band": "below" if s < lo else ("in" if s <= hi else "above"),
-        "encounters": st.n_enc if st else 0,
+        "encounters": fact.count if fact else 0,
         "hover": st.n_hover if st else 0,
         "known_click": st.n_known if st else 0,
-        "last_seen": st.t_E if st else None,
+        "last_seen": max((t for t in (fact.last_selected if fact else None,
+                                     st.t_E if st else None) if t is not None), default=None),
+        "has_learning_state": st is not None,
     }
 
 
@@ -133,6 +150,8 @@ def trend(engine, days=7):
         day = time.strftime("%Y-%m-%d", time.gmtime(ts))
         b = buckets.setdefault(day, {"date": day, "encounter": 0, "annotation_shown": 0,
                                      "hover": 0, "known_click": 0, "new_lemmas": set()})
+        if etype in SELECTED_TYPES:
+            etype = "encounter"
         if etype in b:
             b[etype] += 1
         if etype == "encounter":
@@ -191,12 +210,18 @@ def assemble(engine, params: dict):
         pp = persona_mod.load_params()
         ctx["persona"] = {"params": pp, "prompt": persona_mod.render(pp)}
     if "learner" in include:
-        total = engine.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        total = engine.conn.execute("SELECT COUNT(*) FROM events WHERE type != 'visible_opportunity'").fetchone()[0]
+        with (getattr(engine, "lock", None) or nullcontext()):
+            engine._ensure_learning_writable()
+            tracked = len(engine.states)
+            selected = len(engine.contacts)
+            band = metrics_mod.band_population(engine.states, engine.params)
         ctx["learner"] = {
             "total_events": total,
             "lexicon_size": len(engine.translations),
-            "tracked_lemmas": len(engine.states),
-            "band": metrics_mod.band_population(engine.states, engine.params),
+            "tracked_lemmas": tracked,
+            "selected_lemmas": selected,
+            "band": band,
         }
     if "words" in include:
         ctx["words"] = band_words(engine, top_n)
@@ -260,9 +285,9 @@ def assemble(engine, params: dict):
     cap = int(params.get("max_tokens") or cfg.get("context_max_tokens", 200000))
     toks = estimate_tokens(ctx)
     trimmed = []
-    # 渐进裁剪顺序：低 S 的词 → metrics 明细 → 页面
+    # 先缩现有词表（允许缩至空以结束），再裁 metrics 明细；不重排词表。
     while toks > cap and ctx.get("words"):
-        half = max(1, len(ctx["words"]) // 2)
+        half = len(ctx["words"]) // 2
         ctx["words"] = ctx["words"][:half]
         trimmed.append("words:" + str(half))
         toks = estimate_tokens(ctx)

@@ -81,6 +81,12 @@ def build(source, cache, output, lock):
         stage.mkdir()
         for name in (*lock['baseline_files'], *INSTALL_FILES):
             relative = member_path(name)
+            # Keep developer files under the source lock, outside the user asset.
+            if (relative.parts[:2] == ('pae', 'tests')
+                    or (relative.parent.as_posix() == 'pae/pae_core'
+                        and relative.match('test_*.py'))
+                    or relative.as_posix() == 'requirements-dev.txt'):
+                continue
             original = source.joinpath(*relative.parts)
             if not original.is_file() or original.is_symlink():
                 raise ValueError('missing package file: ' + name)

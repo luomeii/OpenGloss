@@ -4,18 +4,19 @@
 四道钉：
 1. 冻结文件哈希（state/fold/lemmatize 一行不许变）
 2. 26 号算法规格的常数逐个对上
-3. 规格文档里写死的数值行为（首遭遇 S=0.195842）实测复现
-4. 事件溯源的结构不变量：**增量路径 ≡ 全量重放**（同一份事件，实时折叠 vs 重启重放，状态逐项相等）
+3. 旧 encounter 初始 S=0.195842；新版自动选词只记接触事实，主动互动沿用原增量
+4. 在参数不变时，实时状态与同一批已提交事件的完整重放一致
 
 工件 tests/artifacts/t13_conformance.json
 """
 import hashlib
 import json
-import os
+from contextlib import ExitStack, closing
 import pathlib
+import sqlite3
 import sys
 import tempfile
-import time
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -23,6 +24,8 @@ ART = pathlib.Path(__file__).parent / "artifacts"
 ART.mkdir(exist_ok=True)
 
 from pae_core import engine as eng_mod          # noqa: E402
+from pae_core.daily_sheet import build_daily_sheet, local_day_bounds  # noqa: E402
+from pae_core.db import append_event, get_db, init_schema, load_events  # noqa: E402
 from pae_core.state import DEFAULTS, RANGES      # noqa: E402
 
 res = {}
@@ -47,36 +50,84 @@ res["budget"] = eng_mod.BUDGET
 res["ranges_cover_tunables"] = all(k in RANGES for k in
                                    ("half_life_days", "rho", "w_hover", "w_known", "band_lo", "band_hi"))
 
-# ---- 3) 规格写死的行为：首遭遇 S ----
-d = pathlib.Path(tempfile.mkdtemp())
-LEMMA = str(ROOT.parent / "resources" / "ECDICT" / "lemma.en.txt")
-e = eng_mod.Engine(str(d / "t13.db"), LEMMA)
-out = e.annotate("contention", page_id="t13-first")
-first_s = out[0]["s_value"] if out else None
-res["first_encounter_s"] = first_s
-res["first_encounter_matches_spec"] = (first_s is not None and abs(first_s - 0.196) <= 0.002)
+# ---- 3) 旧历史、新接触和主动互动 ----
+with tempfile.TemporaryDirectory(prefix="pae-t13-") as temp, ExitStack() as stack:
+    fixture = pathlib.Path(temp)
+    db = fixture / "events.db"
+    dictionary = fixture / "dictionary.sqlite"
+    lemma_map = fixture / "lemma.en.txt"
+    lemma_map.write_text("", encoding="utf-8")
+    words = ("contention", "scheduler", "intensity", "quartz")
+    with closing(sqlite3.connect(dictionary)) as conn:
+        conn.execute("CREATE TABLE dict_words(word TEXT PRIMARY KEY, translation TEXT, bnc INTEGER)")
+        conn.execute("CREATE TABLE exchange_map(inflected TEXT, base TEXT)")
+        conn.executemany("INSERT INTO dict_words VALUES (?, '测试释义', 0)", ((word,) for word in words))
+        conn.commit()
+    start, end = local_day_bounds("2026-06-03")
+    now = start + 12 * 3600
+    legacy_key = ("scheduler", 0)
+    new_key = ("contention", 0)
+    legacy_ts = now - 86400
+    with closing(get_db(db)) as conn, patch("pae_core.db._now", return_value=legacy_ts):
+        init_schema(conn)
+        append_event(conn, "encounter", {"lemma_id": legacy_key[0], "session_id": "legacy"},
+                     idem_key="t13-legacy")
 
-# ---- 4) 增量 ≡ 全量 ----
-for i in range(12):
-    e.annotate("contention scheduler intensity quartz", page_id="t13-p%d" % i,
-               session_id="s%d" % (i % 3))
-e.record_event("hover", "quartz", metas={"session_id": "s1"})
-e.record_event("known_click", "intensity")
-live = {k: round(st.s_value(e.params), 6) for k, st in e.states.items()}
+    stack.enter_context(patch.object(eng_mod, "DICT_SQLITE_PATH", str(dictionary)))
+    stack.enter_context(patch.object(eng_mod.time, "time", return_value=now))
+    engine = eng_mod.Engine(db, lemma_map)
+    stack.enter_context(closing(engine.conn))
+    stack.enter_context(closing(engine.learning_conn))
+    engine._proactive_dispatch_ts = now  # 禁止启动与本验收无关的后台任务。
 
-e2 = eng_mod.Engine(str(d / "t13.db"), LEMMA)
-replay = {k: round(st.s_value(e2.params), 6) for k, st in e2.states.items()}
-res["live_count"] = len(live)
-res["replay_count"] = len(replay)
-diff = {str(k): {"live": live.get(k), "replay": replay.get(k)} for k in set(live) | set(replay)
-        if live.get(k) != replay.get(k)}
-res["incremental_equals_full"] = (not diff)
-res["diff_sample"] = dict(list(diff.items())[:5])
+    legacy = engine.states.get(legacy_key)
+    res["legacy_first_encounter_s"] = round(legacy.s_value(engine.params), 6) if legacy else None
+    res["legacy_first_encounter_matches_spec"] = bool(
+        legacy and legacy.E == 1.0 and legacy.n_enc == 1 and legacy.t_E == legacy_ts
+        and res["legacy_first_encounter_s"] == 0.195842
+        and engine.contacts.get(legacy_key) and engine.contacts[legacy_key].count == 1)
+
+    out = engine.annotate(new_key[0], page_id="t13-first")
+    engine.annotate(new_key[0], page_id="t13-first")
+    events = load_events(engine.conn)
+    today = build_daily_sheet(db, dictionary, start, end)["rows"]
+    res["first_selected_s"] = out[0]["s_value"] if out else None
+    res["first_selected_is_contact_only"] = (
+        len(out) == 1 and out[0]["lemma"] == new_key[0] and out[0]["counted"]
+        and res["first_selected_s"] == 0.0 and new_key not in engine.states
+        and new_key in engine.contacts and engine.contacts[new_key].count == 1
+        and [(event["type"], event["payload"].get("lemma_id")) for event in events]
+        == [("encounter", legacy_key[0]), ("contact_selected_v1", new_key[0])]
+        and [(row["lemma"], row["encounters"]) for row in today] == [(new_key[0], 1)])
+
+    for i in range(12):
+        engine.annotate("contention intensity quartz", page_id=f"t13-p{i}", session_id=f"s{i % 3}")
+    hover = engine.record_event("hover", "quartz", metas={"session_id": "s1"})
+    known = engine.record_event("known_click", "intensity")
+    hovered = engine.states.get(("quartz", 0))
+    recognized = engine.states.get(("intensity", 0))
+    res["active_evidence_matches_spec"] = bool(
+        hover["ok"] and hover["counted"] and hovered and hovered.E == 0.3 and hovered.n_hover == 1
+        and known["ok"] and known["counted"] and recognized
+        and recognized.E == 4.5 and recognized.n_known == 1)
+
+    # ---- 4) 相同参数下，增量 ≡ 全量 ----
+    replay = eng_mod.Engine(db, lemma_map)
+    stack.enter_context(closing(replay.conn))
+    stack.enter_context(closing(replay.learning_conn))
+    res["live_count"] = len(engine.states)
+    res["replay_count"] = len(replay.states)
+    res["incremental_equals_full"] = (
+        engine.states == replay.states and engine.contacts == replay.contacts
+        and engine.seen_idem == replay.seen_idem and new_key not in replay.states)
 
 ok = (all(res["frozen_unchanged"].values()) and not res["spec_constants_mismatch"]
       and res["annotate_max_s"] == 0.75 and res["budget"] == 8 and res["ranges_cover_tunables"]
-      and res["first_encounter_matches_spec"] and res["incremental_equals_full"])
+      and res["legacy_first_encounter_matches_spec"] and res["first_selected_is_contact_only"]
+      and res["active_evidence_matches_spec"] and res["incremental_equals_full"])
 res["T13"] = "PASS" if ok else "FAIL"
 (ART / "t13_conformance.json").write_text(json.dumps(res, ensure_ascii=False, indent=1), encoding="utf-8")
 print(json.dumps(res, ensure_ascii=False, indent=1))
 print("T13 CONFORMANCE:", res["T13"])
+if not ok:
+    sys.exit(1)

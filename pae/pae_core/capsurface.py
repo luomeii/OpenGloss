@@ -187,7 +187,8 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
     if name == "pae.status":
         return get_engine().status()
     if name == "pae.config":
-        return _config()
+        from .api import safe_config
+        return safe_config(_config())
     if name == "pae.event":
         metas = {k: params.get(k) for k in ("page_id", "session_id", "s_value", "page_active_ms")
                  if params.get(k) is not None}
@@ -251,7 +252,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         from . import params as params_mod
         from . import push as push_mod
         eng = get_engine()
-        ok, body = params_mod.propose(eng.conn, params.get("actor") or actor,
+        ok, body = params_mod.propose(eng.conn, actor,
                                       params.get("patch"), params.get("rationale", ""),
                                       params.get("evidence"), params.get("ttl_days"))
         if not ok:
@@ -259,7 +260,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
         eng.refresh_params()
         push_mod.notify(eng.conn, "param_changed",
                         {"decision_id": body.get("decision_id"), "after": body.get("applied_keys")},
-                        actor=params.get("actor") or "companion")
+                        actor=actor)
         return body
     if name == "pae.decisions":
         from . import params as params_mod
@@ -447,7 +448,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
     if name == "pae.persona.update":
         from . import params as params_mod
         newp = params.get("params") or {}
-        ok, issues, axes = params_mod.persona_guard(get_engine().conn, params.get("actor") or actor, newp)
+        ok, issues, axes = params_mod.persona_guard(get_engine().conn, actor, newp)
         if not ok:
             raise ValueError(json.dumps({"error": "persona_guard", "issues": issues}, ensure_ascii=False))
         ok2, issues2, path = persona_mod.save_params(newp)
@@ -459,7 +460,7 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
             "INSERT INTO decisions(decision_id, ts, actor, capability, patch, rationale, evidence,"
             " before, after, applied, gate_result) VALUES(?,?,?,?,?,?,?,?,?,1,?)",
             ("dec_" + __import__("uuid").uuid4().hex[:16], int(time.time()),
-             params.get("actor") or actor, "pae.persona.update",
+             actor, "pae.persona.update",
              json.dumps([{"axis": k, "to": v["to"]} for k, v in axes.items()], ensure_ascii=False),
              params.get("rationale") or "", "[]", json.dumps(axes, ensure_ascii=False),
              json.dumps(axes, ensure_ascii=False), "persona_guard: ok"))
@@ -490,9 +491,8 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                 lines = []
                 for f in ((c.get("memory") or {}).get("facts") or [])[:8]:
                     lines.append("- 我记得：" + str(f.get("text")))
-                # 注意（2026-10-02 首日反馈修复）：recent_turns **不再**拼进 context_block——
-                # 拼在背景资料里模型不会当成「刚才的对话」，用户实测问「我第一句说了什么」它答非所问。
-                # 它改走下面真正的 messages 历史（role=user/assistant）；facts/带/指标部分保留。
+                # 对话历史通过下面的 messages 保留 user/assistant 角色，
+                # 不拼入背景 context_block；事实、学习带和指标继续作为背景资料。
                 band = (c.get("learner") or {}).get("band") or {}
                 lines.append("- 学习带：带内 %s 词，带下 %s 词" % (band.get("in_band"), band.get("below_band")))
                 m = c.get("metrics") or {}
@@ -524,9 +524,8 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                  "[[记住]] 一句客观转述（60字以内）。\n"
                  "系统会截走这一行存进长期记忆（侧栏「它记下的」可见，之后每次对话你都会想起它），"
                  "这行不会显示给用户。用户没有让记的时候，绝对不要写这一行。")
-        # 长上下文（2026-10-03 二次反馈）：6 轮窗口太短——用户实测聊约 30 轮后，
-        # 她连用户第一句说了什么都答不上来。模型上下文 128K，历史按
-        # config chat_history_turns（默认 64 轮 ≈ 32 次问答）整段作为消息数组送入。
+        # 历史消息条数由 config chat_history_turns 控制，默认64条；
+        # user和agent消息分别计数，并按下方范围约束后装配消息数组。
         hist_n = 64
         try:
             hist_n = int(_config().get("chat_history_turns") or 64)
@@ -625,10 +624,14 @@ def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
         actor, scopes = actor_hint, ["read", "write"]
     else:
         actor, scopes = keys_mod.resolve(key)
+    # These two operations reserve local user authority for the local user channel.
+    if key and actor in ("local", "user") and name in ("pae.propose", "pae.persona.update"):
+        audit(actor, name, False, "reserved_role")
+        return 403, {"ok": False, "error": "reserved_role"}
     # 安全：**身份只能来自认证**。params 里的 actor 仅在「无 key 的本机通道」生效
     # （那是用户自己的机器，用它模拟某个 actor 做测试/触发是合理的）；
     # 一旦带了 key（外部智能体），params 里的 actor 一律忽略，否则可以自称 user 提权。
-    if actor == "local" and isinstance(params, dict) and params.get("actor"):
+    if not key and actor == "local" and isinstance(params, dict) and params.get("actor"):
         actor = str(params["actor"])
     if actor is None:
         audit("unknown", name, False, "unauthorized")  # 被拒也要留痕：能看见谁试过什么
@@ -647,9 +650,31 @@ def handle(name: str, params: dict, key: str = "", actor_hint: str = None):
     if need not in (scopes or []):
         audit(actor, name, False, "scope_denied")
         return 403, {"ok": False, "error": "scope_denied", "need": need, "have": scopes}
+    # Write handlers also consume params.actor for ownership and quotas.
+    # Bind those consumers to the key or non-user process identity without mutating the
+    # caller's object or changing actor filters on read-only queries.
+    if (key or (actor_hint and actor_hint not in ("local", "user"))) and need == "write" and isinstance(params, dict):
+        params = {**params, "actor": actor}
+    # A commit acknowledgement can be lost. Learning views and writes must
+    # wait for replay rather than present the in-memory state as authoritative.
+    if name in {
+            "pae.health", "pae.annotate", "pae.status", "pae.event",
+            "pae.context", "pae.page", "pae.metrics", "pae.word",
+            "pae.events", "pae.pin", "pae.familiarity",
+            "pae.familiarity.restore", "pae.outcomes", "pae.trend"}:
+        from .engine import get_engine
+        if getattr(get_engine(), '_learning_write_fault', False):
+            audit(actor, name, False, "learning_write_paused")
+            return 503, {"ok": False, "error": "learning_write_paused",
+                         "restart_required": True}
     try:
         result = _dispatch(name, params or {}, actor)
     except Exception as e:
+        from .engine import LearningWritePaused
+        if isinstance(e, LearningWritePaused):
+            audit(actor, name, False, "learning_write_paused")
+            return 503, {"ok": False, "error": "learning_write_paused",
+                         "restart_required": True}
         audit(actor, name, False, "%s: %s" % (type(e).__name__, e))
         return 500, {"ok": False, "error": "%s: %s" % (type(e).__name__, str(e)[:200])}
     audit(actor, name, True, "")

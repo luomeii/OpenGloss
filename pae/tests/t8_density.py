@@ -115,11 +115,6 @@ try:
                 break
             last = n
         res["highlight_total"] = page.evaluate("CSS.highlights && CSS.highlights.get('pae-word') ? CSS.highlights.get('pae-word').size : 0")
-        dbg = page.evaluate("document.documentElement.dataset.paeDebug || ''")
-        try:
-            res["debug"] = json.loads(dbg)
-        except Exception:
-            res["debug"] = {}
         res["page_text_chars"] = page.evaluate("document.body.textContent.length")
         ctx.close()
 finally:

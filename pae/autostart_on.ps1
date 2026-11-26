@@ -1,68 +1,96 @@
-﻿# Register a per-user autostart entry for THIS folder.
-#
-# Lessons from 2026-10-25:
-#  1. The launcher must not ShellExecute the .bat directly. Windows shows
-#     "Open File - Security Warning" for batch files that came out of a
-#     downloaded ZIP, and at logon nobody can click Run. Running through
-#     cmd.exe avoids that prompt. The installer also strips that mark.
-#  2. It must use the bundled python.exe (start_engine.bat does), never a PATH lookup.
-#  3. It must not block at logon: stdin comes from NUL so the trailing 'pause' returns.
-#  4. The .vbs uses relative names with CurrentDirectory set, so there is not a
-#     single nested quote to get wrong.
 param([switch]$Remove)
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location -LiteralPath $here
-
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $entryName = 'OpenGloss'
-$vbsPath = Join-Path $here 'autostart_hidden.vbs'
+$vbsPath = Join-Path $PSScriptRoot 'autostart_hidden.vbs'
+$expected = 'wscript.exe "' + $vbsPath + '"'
 
-if ($Remove) {
-    if (Get-ItemProperty -Path $runKey -Name $entryName -ErrorAction SilentlyContinue) {
-        Remove-ItemProperty -Path $runKey -Name $entryName -Force
-        Write-Host '[PAE] Autostart is OFF. The entry was removed.'
-    } else {
-        Write-Host '[PAE] Autostart was already OFF.'
+function Read-Registration {
+    try {
+        $key = Get-Item -LiteralPath $runKey -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return [pscustomobject]@{ KeyExists = $false; Entry = $null }
     }
-    if (Test-Path -LiteralPath $vbsPath) { Remove-Item -LiteralPath $vbsPath -Force }
-    exit 0
-}
-
-foreach ($need in 'python.exe','start_engine.bat') {
-    if (-not (Test-Path -LiteralPath (Join-Path $here $need))) {
-        Write-Host ('[PAE] ERROR: ' + $need + ' is missing next to this script.')
-        Write-Host '        Re-extract the complete ZIP and run Install.cmd again.'
-        exit 1
+    try {
+        return [pscustomobject]@{
+            KeyExists = $true
+            Entry = $key.GetValue($entryName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        }
+    } finally {
+        $key.Dispose()
     }
 }
 
-$vbs = @(
-    'Set fso = CreateObject("Scripting.FileSystemObject")',
-    'Dim d, sh',
-    'd = fso.GetParentFolderName(WScript.ScriptFullName)',
-    'Set sh = CreateObject("WScript.Shell")',
-    'sh.CurrentDirectory = d',
-    'sh.Run "cmd /c start_engine.bat < nul >> autostart.log 2>&1", 0, False'
-)
-Set-Content -LiteralPath $vbsPath -Value $vbs -Encoding ASCII
-Write-Host ('[PAE] launcher written: ' + $vbsPath)
-Write-Host '[PAE] launcher content:'
-Get-Content -LiteralPath $vbsPath | ForEach-Object { Write-Host ('  ' + $_) }
-Write-Host ''
+$mutex = $null
+$locked = $false
+$failure = 'Unable to lock the autostart registration.'
+try {
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $mutex = [System.Threading.Mutex]::new($false, 'Global\OpenGloss.Autostart.' + $sid)
+    try {
+        $locked = $mutex.WaitOne(10000)
+    } catch [System.Threading.AbandonedMutexException] {
+        $locked = $true
+    }
+    if (-not $locked) { throw $failure }
 
-# Fail loudly if the generated script does not even parse.
-$probe = & cscript //nologo //T:1 $vbsPath 2>&1
-if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
-    Write-Host '[PAE] ERROR: the generated launcher has a script error:'
-    $probe | ForEach-Object { Write-Host ('  ' + $_) }
+    $failure = 'Unable to read the autostart registration.'
+    $registration = Read-Registration
+    $entry = $registration.Entry
+    $owned = $entry -is [string] -and [string]::Equals($entry, $expected, [StringComparison]::OrdinalIgnoreCase)
+    if ($null -ne $entry -and -not $owned) {
+        $failure = 'Autostart is already registered to another or unrecognized installation.'
+        throw $failure
+    }
+
+    if ($Remove) {
+        if (-not $owned) {
+            Write-Host '[PAE] Autostart is already off.'
+            exit 0
+        }
+        $failure = 'Unable to remove the autostart registration.'
+        Remove-ItemProperty -LiteralPath $runKey -Name $entryName -ErrorAction Stop
+        if ($null -ne (Read-Registration).Entry) { throw $failure }
+        $failure = 'Autostart is off, but the local launcher could not be removed.'
+        if (Test-Path -LiteralPath $vbsPath) { Remove-Item -LiteralPath $vbsPath -Force }
+        Write-Host '[PAE] Autostart is off.'
+        exit 0
+    }
+
+    $failure = 'Bundled Python or the start script is missing. Run Install.cmd first.'
+    foreach ($name in 'python.exe', 'start_engine.bat') {
+        if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name) -PathType Leaf)) { throw $failure }
+    }
+    $failure = 'Unable to prepare the local autostart launcher.'
+    $vbs = @(
+        'Set fso = CreateObject("Scripting.FileSystemObject")',
+        'Dim d, sh',
+        'd = fso.GetParentFolderName(WScript.ScriptFullName)',
+        'Set sh = CreateObject("WScript.Shell")',
+        'sh.CurrentDirectory = d',
+        'sh.Run "cmd /c start_engine.bat < nul >> autostart.log 2>&1", 0, False'
+    )
+    if (Test-Path -LiteralPath $vbsPath) {
+        $launcher = Get-Item -LiteralPath $vbsPath
+        if ($launcher.PSIsContainer -or ($launcher.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw $failure }
+    }
+    Set-Content -LiteralPath $vbsPath -Value $vbs -Encoding ASCII
+
+    if (-not $owned) {
+        $failure = 'Unable to save the autostart registration.'
+        if (-not $registration.KeyExists) { New-Item -Path $runKey | Out-Null }
+        Set-ItemProperty -LiteralPath $runKey -Name $entryName -Value $expected -Type String -ErrorAction Stop
+        $saved = (Read-Registration).Entry
+        if ($saved -isnot [string] -or -not [string]::Equals($saved, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw $failure
+        }
+    }
+    Write-Host '[PAE] Autostart is on. The engine will start at the next logon.'
+} catch {
+    Write-Host ('[PAE] ERROR: ' + $failure)
     exit 1
+} finally {
+    if ($locked) { $mutex.ReleaseMutex() }
+    if ($null -ne $mutex) { $mutex.Dispose() }
 }
-
-$value = 'wscript.exe "' + $vbsPath + '"'
-Set-ItemProperty -Path $runKey -Name $entryName -Value $value -Force
-Write-Host ('[PAE] registered for this user: ' + $value)
-Write-Host '[PAE] Autostart is ON. The engine will start (hidden) at every logon.'
-Write-Host ('[PAE] Start log: ' + (Join-Path $here 'autostart.log'))
-Write-Host '[PAE] Turn it off again with autostart_off.bat.'
 exit 0

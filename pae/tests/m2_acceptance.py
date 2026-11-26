@@ -5,14 +5,14 @@ The test owns the engine lifecycle on 127.0.0.1:4815 with a temp DB so results d
 depend on accumulated production state. The production engine is restarted afterwards.
 
 Acceptance:
-  (1) annotations returned and rendered > 0;
+  (1) the initial fixture text has at least one registered highlight range;
   (2) BODY TEXT UNCHANGED -- baseline is captured by an init script BEFORE the first
-      annotation exists (asserted at capture time from document.dataset.paeDebug),
+      highlight exists (asserted against the highlight registry at capture time),
       then compared against the post-annotation read; additionally the post-annotation
       text is compared against the pristine fixture text (hash equality) and the
       #main DOM shape (text nodes / elements) is required to be unchanged;
   (3) dynamically injected paragraph gets annotated;
-  (4) zero page errors.
+  (4) zero page errors and no annotation debug attribute in the document.
 Artifact: tests/artifacts/m2_acceptance.json
 """
 import hashlib
@@ -149,28 +149,30 @@ def wait_health(timeout=30):
     return False
 
 
-def read_debug(page):
-    raw = page.evaluate("document.documentElement.dataset.paeDebug || ''")
-    try:
-        return json.loads(raw) if raw else {}
-    except Exception:
-        return {"_raw": raw[:200]}
+HIGHLIGHT_COUNTS_JS = """() => {
+  const highlight = CSS.highlights?.get('pae-word');
+  const initial = document.getElementById('main');
+  const injected = document.getElementById('p3');
+  let initialCount = 0, injectedCount = 0;
+  if (highlight) highlight.forEach(range => {
+    if (initial && initial.contains(range.startContainer)) initialCount++;
+    if (injected && injected.contains(range.startContainer)) injectedCount++;
+  });
+  return {initial: initialCount, injected: injectedCount};
+}"""
 
 
 # Runs at document_start, before any content script can touch the page. Captures the
-# pristine body text at DOMContentLoaded AND the annotation count reported by the page
+# pristine body text at DOMContentLoaded AND the registered highlight count
 # at that exact moment, so the baseline is provably pre-annotation.
 INIT_SNAPSHOT_JS = """
 window.__paeTextSnapshot = null;
-window.__paeTextSnapshotAnn = null;
+window.__paeTextSnapshotRanges = null;
 (function () {
   function grab() {
     try {
       window.__paeTextSnapshot = document.body ? document.body.textContent : null;
-      var d = document.documentElement.dataset.paeDebug || '';
-      var n = -1;
-      if (d) { try { var o = JSON.parse(d); n = (o && o.annotations != null) ? o.annotations : -1; } catch (e) { n = -2; } }
-      window.__paeTextSnapshotAnn = n;
+      window.__paeTextSnapshotRanges = CSS.highlights?.get('pae-word')?.size ?? 0;
     } catch (e) { window.__paeTextSnapshot = null; }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', grab, { once: true });
@@ -214,36 +216,23 @@ def run_browser_checks(results, pristine):
         results["service_workers"] = len(ctx.service_workers)
 
         # 轮询等待注解到位（引擎首请求冷启动加载 77 万词典约 15s，固定 5s 不够）
-        dbg = {}
-        snap = None
-        snap_ann = None
         for _ in range(90):   # 冷启动（77万词典）在串行跑时可能超过 40s；40→90 消除抖动
             page.wait_for_timeout(1000)
-            dbg = read_debug(page)
-            if snap is None:
-                snap = page.evaluate("window.__paeTextSnapshot")
-                snap_ann = page.evaluate("window.__paeTextSnapshotAnn")
-            if dbg.get("annotations", -1) not in (-1, None):
+            if page.evaluate(HIGHLIGHT_COUNTS_JS)["initial"] > 0:
                 break
 
-        dbg = read_debug(page)
-        results["debug_first_batch"] = dbg
-        results["annotations_returned"] = dbg.get("annotations", -1)
-        results["rendered"] = (dbg.get("rendered") or {}).get("rendered", -1)
-        # highlight registry must be queried from the MAIN world (the isolated content-
-        # script world sees its own view; rendered ranges live in the document registry).
-        results["highlight_ranges"] = page.evaluate(
-            "(() => { try { const h = CSS.highlights && CSS.highlights.get('pae-word');"
-            " return h ? h.size : -1; } catch (e) { return -2; } })()")
+        results["initial_highlight_ranges"] = page.evaluate(HIGHLIGHT_COUNTS_JS)["initial"]
+        no_debug_attribute = page.locator("html").get_attribute("data-pae-debug") is None
 
-        # ---- R5 修复：基线来自 document_start 快照，且采集时刻页面自称 annotations<=0 ----
+        snap = page.evaluate("window.__paeTextSnapshot")
+        snap_ranges = page.evaluate("window.__paeTextSnapshotRanges")
         after = page.evaluate(AFTER_JS)
         text_after = after.get("text", "")
         results["baseline_source"] = "init-script @DOMContentLoaded (before first annotation)"
         results["snapshot_captured"] = snap is not None
-        results["snapshot_annotations_at_capture"] = snap_ann
+        results["snapshot_highlight_ranges_at_capture"] = snap_ranges
         results["snapshot_taken_before_annotation"] = (snap is not None
-                                                       and snap_ann in (-1, 0, None))
+                                                       and snap_ranges == 0)
         results["snapshot_raw_len"] = len(snap or "")
         results["snapshot_norm_len"] = len(norm_ws(snap))
         results["after_norm_len"] = len(text_after)
@@ -282,11 +271,13 @@ def run_browser_checks(results, pristine):
             'before the perfunctory recalcitrant inspection.</p>\";',
         ]).replace('id=1', chr(39) + 'p3' + chr(39))
         page.evaluate(js_inject)
-        page.wait_for_timeout(4000)
-        dbg2 = read_debug(page)
-        results["debug_second_batch"] = dbg2
-        results["after_inject"] = dbg2.get("annotations", -1)
-        results["after_inject_rendered"] = (dbg2.get("rendered") or {}).get("rendered", -1)
+        for _ in range(10):
+            page.wait_for_timeout(500)
+            if page.evaluate(HIGHLIGHT_COUNTS_JS)["injected"] > 0:
+                break
+        results["injected_highlight_ranges"] = page.evaluate(HIGHLIGHT_COUNTS_JS)["injected"]
+        results["debug_attribute_absent"] = (
+            no_debug_attribute and page.locator("html").get_attribute("data-pae-debug") is None)
         results["page_errors"] = len(errors)
         results["errors"] = errors[:3]
         ctx.close()
@@ -323,12 +314,11 @@ def main():
         )
 
     ok = (results.get("service_workers", 0) >= 1
-          and results.get("annotations_returned", 0) > 0
-          and results.get("rendered", 0) > 0
-          and results.get("highlight_ranges", 0) > 0
+          and results.get("initial_highlight_ranges", 0) > 0
           and results.get("text_unchanged") is True
           and results.get("page_errors", 1) == 0
-          and results.get("after_inject", 0) > 0)
+          and results.get("injected_highlight_ranges", 0) > 0
+          and results.get("debug_attribute_absent") is True)
     results["run_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     results["M2"] = "PASS" if ok else "FAIL"
     print(json.dumps(results, ensure_ascii=False, indent=1))

@@ -4,7 +4,7 @@
 背景（实测根因）：链路 push.say → BUS → GET /v1/ext/stream(SSE) → sw.js paeBroadcast →
 content.js PAE_PUSH → 角色壳 全都是通的；但引擎侧唯一会 emit say 的是能力面 pae.say
 （要外部调用者）与 agent.tick（真 LLM，且 agent_schedule.enabled 默认 false）。
-当时实测：两天使用量下 push_log 0 行、agent_log 0 行 → 她一次都没主动开口。
+本测试使用临时库和合成记录检查主动提醒的触发与传递。
 
 修复：push.maybe_proactive(conn, engine, now)——自发触发，由 engine.annotate 末尾
 **后台线程**派发（≥300s 一次；LLM 版可能要 1-2 秒，绝不能挂在注解响应里拖慢页面）。

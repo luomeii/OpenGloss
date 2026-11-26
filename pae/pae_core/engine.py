@@ -1,13 +1,17 @@
 """PAE engine service logic (no HTTP). Events -> states -> annotations."""
 import hashlib
 import re
+import sqlite3
 import threading
 import time
+from dataclasses import replace
+from pathlib import Path
 
 from .db import (append_event, get_db, import_lemma_as_dict, init_schema,
                  load_events, lookup_word)
-from .dict_loader import load_exchange_map, load_full_dict
-from .fold import fold_event
+from .dict_loader import IndexedTranslationLookup, load_exchange_map, load_translation_lookup
+from .fold import fold_event, score_at
+from .contacts import CONTACT_SELECTED, SELECTED_TYPES, project_contact
 from .lemmatize import candidates, load_lemma_map
 from .state import DEFAULTS
 
@@ -62,6 +66,10 @@ LEMMA_PATH = _paths.lemma_path()
 DICT_SQLITE_PATH = _paths.dict_path()
 
 
+class LearningWritePaused(RuntimeError):
+    """A feedback commit failed; restart before accepting more learning writes."""
+
+
 class Engine:
     """Append-only event log + deterministic fold replay + annotation budget."""
 
@@ -73,20 +81,36 @@ class Engine:
         import_lemma_as_dict(self.conn, self.lemma_map_path)
         self.lemma_map = load_lemma_map(self.lemma_map_path)
         self.exchange_map = load_exchange_map(DICT_SQLITE_PATH)
-        self.translations = load_full_dict(DICT_SQLITE_PATH)
-        # 有效参数 = 算法常数 ⊕ 引擎旋钮 ⊕ 运行时覆盖（AI 提案改的就是这层）
+        self.translations = load_translation_lookup(DICT_SQLITE_PATH)
         try:
-            from . import params as _params_mod
-            self.params = _params_mod.effective(self.conn)
-        except Exception:
-            self.params = dict(DEFAULTS)
-        self.lock = threading.Lock()
-        self.states = {}
-        self.seen_idem = set()
-        self._replay()
+            # 有效参数 = 算法常数 ⊕ 引擎旋钮 ⊕ 运行时覆盖（AI 提案改的就是这层）
+            try:
+                from . import params as _params_mod
+                self.params = _params_mod.effective(self.conn)
+            except Exception:
+                self.params = dict(DEFAULTS)
+            self.lock = threading.Lock()
+            self.states = {}
+            self.seen_idem = set()
+            self._replay()
+            # Only learning events use this connection. Other writers can no longer
+            # commit an annotate batch that belongs to this engine.
+            self.learning_conn = get_db(self.db_path)
+        except BaseException:
+            self._close_translation_lookup()
+            raise
+
+    def _close_translation_lookup(self):
+        if isinstance(self.translations, IndexedTranslationLookup):
+            self.translations.close()
+
+    def _learning_connection(self):
+        # Synthetic Engine.__new__ fixtures from earlier stages have only conn.
+        return getattr(self, 'learning_conn', self.conn)
 
     def _replay(self):
-        for ev in load_events(self.conn):
+        self.contacts = {}
+        for ev in load_events(self.conn, include_visible_opportunity=False):
             payload = ev.get("payload") or {}
             folded = dict(payload)
             folded["ts"] = ev["ts"]
@@ -94,6 +118,12 @@ class Engine:
             folded["idem_key"] = ev["idem_key"]
             if "lemma_id" not in folded and folded.get("lemma"):
                 folded["lemma_id"] = folded["lemma"]
+            if ev["type"] in SELECTED_TYPES and ev["idem_key"] not in self.seen_idem:
+                project_contact(self.contacts, folded)
+            if ev["type"] == CONTACT_SELECTED:
+                if ev["idem_key"] is not None:
+                    self.seen_idem.add(ev["idem_key"])
+                continue
             fold_event(self.states, folded, self.params, self.seen_idem)
 
     def reduce_chain(self, tok):
@@ -126,7 +156,13 @@ class Engine:
             frontier = nxt
         return ordered
 
-    def annotate(self, text, page_id, session_id=None):
+    def annotate(self, text, page_id, session_id=None, max_annotations=None):
+        self._ensure_learning_writable()
+        if max_annotations is not None and (type(max_annotations) is not int or max_annotations < 0):
+            raise ValueError('max_annotations must be a non-negative integer')
+        budget = BUDGET if max_annotations is None else min(BUDGET, max_annotations)
+        if budget == 0:
+            return []
         text = text or ""
         page_id = str(page_id)
         # 参数陈旧就刷新（最多滞后 5 秒）——ttl 到期自动回滚靠这个生效
@@ -149,9 +185,6 @@ class Engine:
         tokens = [t.lower() for t in TOKEN_RE.findall(text)]
         now = int(time.time())
         day_bucket = now // 86400
-        out = []
-        first_seen = set()
-
         # ---- 选择层 Phase 1（2026-10-02 算法复审 D2：让学习带真正参与选择）----
         # 旧行为（text_order）：文本顺序取前 BUDGET 个有释义的词——学习状态只剩 S<max_s 的
         #   二元闸，26 号的「学习带」只做报表，核心机制名存实亡（独立复审判定）。
@@ -181,7 +214,7 @@ class Engine:
                 continue
             _seen.add(_lemma)
             _st0 = self.states.get((_lemma, 0))
-            _s0 = _st0.s_value(self.params) if _st0 is not None else 0.0
+            _s0 = score_at(_st0, self.params, now)
             _cands.append((_lemma, _s0,
                            bool(_st0 is not None and getattr(_st0, 'pinned', False))))
         if SELECTION_MODE == 'band_priority' and _cands:
@@ -215,8 +248,75 @@ class Engine:
                 return 2 if _band_lo <= _c[1] <= _band_hi else 1
 
             _cands.sort(key=lambda _c: (-_prio(_c), abs(_c[1] - _mid)))
-        chosen = set(_c[0] for _c in _cands[:BUDGET])
+            # Read eligibility and contact flags together, only for this batch.
+            with self.lock:
+                _a_positions = []
+                eligible_candidates = []
+                for index, candidate in enumerate(_cands):
+                    key = (candidate[0], 0)
+                    if key not in self.states and _prio(candidate) == 1:
+                        _a_positions.append(index)
+                        eligible_candidates.append((candidate, key in self.contacts))
+            eligible_candidates.sort(key=lambda item: item[1])
+            for index, (candidate, _) in zip(_a_positions, eligible_candidates):
+                _cands[index] = candidate
+        chosen = set(_c[0] for _c in _cands[:budget])
+        # Keep the existing learning lock across the entire batch. Push and
+        # record_event cannot enter a second learning transaction mid-request.
+        with self.lock:
+            self._ensure_learning_writable()
+            out = self._append_annotate_batch(
+                tokens, chosen, text, page_id, session_id, day_bucket, now, budget)
+        # 主动说话（问题一修复，2026-10-03）：规则版自发触发，补上引擎侧唯一缺失的 say 生产者。
+        # 2026-10-03 二次反馈升级：命中触发时可能走 LLM（1-2 秒）——绝不能挂在注解响应里
+        # 拖慢页面（用户红线：不许拖慢阅读），改为**后台线程派发**：每个引擎实例 ≥300s
+        # 派发一次；push 侧还有自己的节流/限流做第二道闸。异常一律吞掉——
+        # 绝不能因为「她想说话」把注解主链路拖垮。SQLite 已是 WAL + busy_timeout=30s，
+        # 后台线程写 push_log 与前台写 events 可安全并发。
+        try:
+            from . import push as _push_mod
+            if now - float(getattr(self, "_proactive_dispatch_ts", 0.0)) >= _push_mod.PROACTIVE_EVAL_INTERVAL_S:
+                self._proactive_dispatch_ts = float(now)
+                threading.Thread(target=_push_mod.maybe_proactive,
+                                 args=(self.conn, self, now), daemon=True).start()
+        except Exception:
+            pass
+        return out
 
+    def _append_annotate_batch(self, tokens, chosen, text, page_id, session_id,
+                               day_bucket, now, budget):
+        """Stage changed words and publish only after the batch is durable."""
+        conn = self._learning_connection()
+        staged = {}
+        staged_contacts = {}
+        staged_seen = set()
+        out = []
+        first_seen = set()
+        try:
+            out = self._stage_annotate_words(
+                conn, staged, staged_seen, tokens, chosen, text, page_id,
+                session_id, day_bucket, now, budget, first_seen, out, staged_contacts)
+            try:
+                conn.commit()
+            except Exception:
+                self._learning_write_fault = True
+                raise LearningWritePaused('learning_write_paused: restart required')
+        except Exception:
+            # This connection contains only learning events. A rollback cannot
+            # discard a push, audit, or memory write from the main connection.
+            try:
+                conn.rollback()
+            except Exception:
+                conn.close()
+            raise
+        self.states.update(staged)
+        self.contacts.update(staged_contacts)
+        self.seen_idem.update(staged_seen)
+        return out
+
+    def _stage_annotate_words(self, conn, staged, staged_seen, tokens, chosen,
+                              text, page_id, session_id, day_bucket, now,
+                              budget, first_seen, out, staged_contacts):
         for tok in tokens:
             if tok in STOPWORDS:
                 continue
@@ -250,27 +350,26 @@ class Engine:
             payload = {
                 "lemma_id": lemma,
                 "lemma": lemma,
-                "surface": tok,
-                "sentence_context": text[:200],
-                "page_id": page_id,
-                "session_id": session_id,
             }
-            with self.lock:
-                # 内存判重优先：seen_idem 命中则不碰数据库
-                if idem_key in self.seen_idem:
-                    event_id = None
-                else:
-                    event_id = append_event(self.conn, "encounter", payload,
-                                            idem_key=idem_key, source="api",
-                                            autocommit=False)
-                    if event_id is not None:
-                        folded = dict(payload)
-                        folded["ts"] = now
-                        folded["type"] = "encounter"
-                        folded["idem_key"] = idem_key
-                        fold_event(self.states, folded, self.params, self.seen_idem)
-                st = self.states.get((lemma, 0))
-                s = st.s_value(self.params) if st is not None else 0.0
+            # 内存判重优先：seen_idem 命中则不碰数据库
+            if idem_key in self.seen_idem or idem_key in staged_seen:
+                event_id = None
+            else:
+                event_id = append_event(conn, CONTACT_SELECTED, payload,
+                                        idem_key=idem_key, source="api",
+                                        autocommit=False)
+                if event_id is not None:
+                    fact = dict(payload)
+                    fact["ts"] = conn.execute(
+                        'SELECT ts FROM events WHERE event_id=?', (event_id,)).fetchone()[0]
+                    fact["type"] = CONTACT_SELECTED
+                    key = (lemma, 0)
+                    if key not in staged_contacts and key in self.contacts:
+                        staged_contacts[key] = self.contacts[key]
+                    project_contact(staged_contacts, fact)
+                    staged_seen.add(idem_key)
+            st = staged.get((lemma, 0), self.states.get((lemma, 0)))
+            s = score_at(st, self.params, now)
             # 熟悉度影子集：**仅 enforce 模式**才真的跳过（默认 shadow=只记录，行为零变化）
             if getattr(self, "_fam_mode", None) == "enforce":
                 if lemma in self._fam_exempt:
@@ -287,88 +386,150 @@ class Engine:
                     "s_value": round(s, 3),
                     "counted": event_id is not None,
                 })
-            if len(out) >= BUDGET:
+            if len(out) >= budget:
                 break
-        # 批量事务：整个请求的所有事件一次提交（性能：数百次fsync→1次）。
-        # H3 修复（评审 2026-10-03）：commit 必须持锁——共享连接上事务边界属于连接
-        # 不属于线程，后台线程（主动说话/悬停影子）的 commit 会提前落地本批事件，
-        # 并发相同 SQL 还会撞 sqlite3 语句缓存产生 API misuse 硬异常。
-        # 锁内提交 = 与 record_event 同样的串行化纪律。
-        with self.lock:
-            try:
-                self.conn.commit()
-            except Exception:
-                pass
-        # 主动说话（问题一修复，2026-10-03）：规则版自发触发，补上引擎侧唯一缺失的 say 生产者。
-        # 2026-10-03 二次反馈升级：命中触发时可能走 LLM（1-2 秒）——绝不能挂在注解响应里
-        # 拖慢页面（用户红线：不许拖慢阅读），改为**后台线程派发**：每个引擎实例 ≥300s
-        # 派发一次；push 侧还有自己的节流/限流做第二道闸。异常一律吞掉——
-        # 绝不能因为「她想说话」把注解主链路拖垮。SQLite 已是 WAL + busy_timeout=30s，
-        # 后台线程写 push_log 与前台写 events 可安全并发。
-        try:
-            from . import push as _push_mod
-            if now - float(getattr(self, "_proactive_dispatch_ts", 0.0)) >= _push_mod.PROACTIVE_EVAL_INTERVAL_S:
-                self._proactive_dispatch_ts = float(now)
-                threading.Thread(target=_push_mod.maybe_proactive,
-                                 args=(self.conn, self, now), daemon=True).start()
-        except Exception:
-            pass
         return out
+
+    def _ensure_learning_writable(self):
+        if getattr(self, '_learning_write_fault', False):
+            raise LearningWritePaused('learning_write_paused: restart required')
+
+    def _feedback_state_locked(self, lemma, now):
+        """Only committed rows can confirm feedback; do not read our pending transaction."""
+        idem = hashlib.sha1(('known|%s|%d' % (lemma, now // 86400)).encode('utf-8')).hexdigest()[:20]
+        uri = Path(self.db_path).resolve().as_uri() + '?mode=ro'
+        observer = sqlite3.connect(uri, uri=True, timeout=1)
+        try:
+            row = observer.execute('SELECT 1 FROM events WHERE idem_key=?', (idem,)).fetchone()
+        finally:
+            observer.close()
+        st = self.states.get((lemma, 0))
+        return {'ok': True, 'lemma': lemma, 'recorded': row is not None,
+                'valid_until': (now // 86400 + 1) * 86400,
+                's_value': round(score_at(st, self.params, now), 3)}
+
+    def feedback_state(self, lemma):
+        lemma = (lemma or '').strip()
+        if not lemma:
+            return {'ok': False, 'error': 'empty lemma'}
+        with self.lock:
+            if getattr(self, '_learning_write_fault', False):
+                return {'ok': False, 'error': 'learning_write_paused', 'restart_required': True}
+            return self._feedback_state_locked(lemma, int(time.time()))
 
     def record_event(self, etype, lemma, surface="", metas=None, source="ext"):
         """扩展上报的观察/交互事件（三证据的发射口）。
 
         - annotation_shown：纯观察（fold 的 _OBS_ONLY），不参与 S 推导，按 (lemma, 小时) 去重
         - hover：+0.3 权重，按 (lemma, session, 小时) 去重（防悬停刷分）
-        - known_click：+1.5 权重，按 (lemma, 天) 去重（防连点）
+        - known_click：沿用有效 w_known，按 (lemma, 天) 去重（防连点）
         """
-        if etype not in ("annotation_shown", "hover", "known_click", "user_pin", "user_mastered"):
+        observation = etype == 'visible_opportunity'
+        if etype not in ("annotation_shown", "hover", "known_click", "user_pin", "user_mastered", "visible_opportunity"):
             return {"ok": False, "error": "unknown event type: " + str(etype)}
         lemma = (lemma or "").strip()
         if not lemma:
             return {"ok": False, "error": "empty lemma"}
         now = int(time.time())
         m = metas or {}
-        if etype == "known_click":
+        if observation:
+            # Client report, never learning evidence. Do not accept page text/URLs.
+            if (surface or set(m) != {'page_id', 'visible_ms', 'observation_version'} or
+                    not re.fullmatch(r"[a-z][a-z'-]{2,63}", lemma) or
+                    not isinstance(m.get('page_id'), str) or
+                    not re.fullmatch(r'd[a-z0-9]{10,80}', m['page_id']) or
+                    type(m.get('visible_ms')) is not int or not 1000 <= m['visible_ms'] <= 60000 or
+                    type(m.get('observation_version')) is not int or m['observation_version'] != 1):
+                return {'ok': False, 'counted': False, 'error': 'invalid_visible_opportunity'}
+            bucket_key = 'visible-v1|%s|%d' % (lemma, now // 86400)
+        elif etype == "known_click":
             bucket_key = "known|%s|%d" % (lemma, now // 86400)
         elif etype == "hover":
             bucket_key = "hover|%s|%s|%d" % (lemma, m.get("session_id") or "", now // 3600)
         else:
             bucket_key = "shown|%s|%s|%d" % (lemma, m.get("page_id") or "", now // 3600)
         idem_key = hashlib.sha1(bucket_key.encode("utf-8")).hexdigest()[:20]
-        payload = {"lemma_id": lemma, "lemma": lemma, "surface": surface or lemma}
-        for k in ("page_id", "session_id", "s_value", "page_active_ms", "sentence"):
+        payload = {"lemma_id": lemma, "lemma": lemma}
+        if not observation:
+            payload['surface'] = surface or lemma
+        fields = ('page_id', 'visible_ms', 'observation_version') if observation else (
+            'page_id', 'session_id', 's_value', 'page_active_ms', 'sentence')
+        for k in fields:
             if m.get(k) is not None:
                 payload[k] = m[k]
         with self.lock:
+            if getattr(self, '_learning_write_fault', False):
+                return {'ok': False, 'counted': False, 'error': 'learning_write_paused',
+                        'restart_required': True}
+            conn = self._learning_connection()
             if idem_key in self.seen_idem:
                 return {"ok": True, "counted": False, "reason": "duplicate_bucket"}
+            if observation:
+                st = self.states.get((lemma, 0))
+                if (st is None or st.n_enc < 1) and (lemma, 0) not in self.contacts:
+                    return {'ok': False, 'counted': False, 'error': 'observation_without_encounter'}
+                if conn.execute('SELECT 1 FROM events WHERE idem_key=?', (idem_key,)).fetchone():
+                    return {'ok': True, 'counted': False, 'reason': 'duplicate_bucket', 'observation_only': True}
+                used = int(conn.execute(
+                    "SELECT COUNT(*) FROM events WHERE type='visible_opportunity' AND ts>=? AND ts<?",
+                    (now // 86400 * 86400, (now // 86400 + 1) * 86400)).fetchone()[0])
+                if used >= 1000:
+                    return {'ok': False, 'counted': False, 'error': 'visible_opportunity_daily_limit',
+                            'used_today': used, 'limit': 1000}
             # H2 配额（评审 2026-10-03）：known_click 直接 +4.5 进 S 值（M12-C），批量伪造
             # 可静默关掉任意词的注解——(lemma,天) 去重挡不住换词投毒。按类型日总量设闸：
             # 真人一天点 60 个「认识了」已属重度，攻击循环会被这里掐断。
             if etype == "known_click":
+                feedback = self._feedback_state_locked(lemma, now)
+                if feedback['recorded']:
+                    return {'ok': True, 'counted': False, 'reason': 'duplicate_bucket',
+                            's_value': feedback['s_value'], 'feedback': feedback}
                 day0 = now // 86400 * 86400
-                kc_today = int(self.conn.execute(
+                kc_today = int(conn.execute(
                     "SELECT COUNT(*) FROM events WHERE type='known_click' AND ts>=?",
                     (day0,)).fetchone()[0])
                 if kc_today >= 60:
                     return {"ok": False, "counted": False,
                             "error": "known_click_daily_limit", "used_today": kc_today, "limit": 60}
-            event_id = append_event(self.conn, etype, payload, idem_key=idem_key,
-                                    source=source, autocommit=False)
-            counted = event_id is not None
-            if counted:
-                folded = dict(payload)
-                folded["ts"] = now
-                folded["type"] = etype
-                folded["idem_key"] = idem_key
-                fold_event(self.states, folded, self.params, self.seen_idem)
             try:
-                self.conn.commit()
+                event_id = append_event(conn, etype, payload, idem_key=idem_key,
+                                        source=source, autocommit=False)
+                counted = event_id is not None
+                staged = {}
+                staged_seen = set()
+                folded_params = dict(self.params) if etype == 'known_click' else self.params
+                if counted and not observation:
+                    folded = dict(payload)
+                    folded["ts"] = now
+                    folded["type"] = etype
+                    folded["idem_key"] = idem_key
+                    key = (lemma, 0)
+                    if key in self.states:
+                        staged[key] = replace(self.states[key])
+                    fold_event(staged, folded, folded_params, staged_seen)
+                try:
+                    conn.commit()
+                except Exception:
+                    self._learning_write_fault = True
+                    raise
             except Exception:
-                pass
+                try:
+                    conn.rollback()
+                except Exception:
+                    conn.close()
+                if getattr(self, '_learning_write_fault', False):
+                    return {'ok': False, 'counted': False, 'error': 'learning_write_paused',
+                            'result_unknown': True, 'restart_required': True}
+                raise
+            self.states.update(staged)
+            self.seen_idem.update(staged_seen)
+            if observation:
+                return {'ok': True, 'counted': counted, 'observation_only': True}
             st = self.states.get((lemma, 0))
-            s = round(st.s_value(self.params), 3) if st is not None else 0.0
+            s = round(score_at(st, self.params, now), 3)
+            if etype == 'known_click':
+                return {'ok': True, 'counted': counted, 's_value': s,
+                        'feedback': self._feedback_state_locked(lemma, now)}
         # 悬停 = 最强兴趣信号 → 异步跑义项判定影子（P5 第一步：只写缓存与日志，不上屏）
         if etype == "hover" and (metas or {}).get("sentence") and lemma:
             try:
@@ -383,7 +544,12 @@ class Engine:
         """义项判定影子：失败静默（不影响任何用户可见行为）。"""
         try:
             from . import sensejudge as _sj
-            _sj.judge(self.conn, DICT_SQLITE_PATH, lemma, sentence)
+            from . import llm as _llm_mod
+            from . import user_controls as _controls
+            if not _controls.allowed("shadow"):
+                return
+            with _llm_mod.call_purpose("shadow"):
+                _sj.judge(self.conn, DICT_SQLITE_PATH, lemma, sentence)
         except Exception:
             pass
 
@@ -399,12 +565,14 @@ class Engine:
 
     def status(self):
         with self.lock:
+            self._ensure_learning_writable()
+            now = int(time.time())
             rows = self.conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()
             events = int(rows["n"]) if rows else 0
             lex = self.conn.execute("SELECT COUNT(*) AS n FROM dict_words").fetchone()
             lexicon = int(lex["n"]) if lex else 0
             top = sorted(
-                ((key[0], st.s_value(self.params)) for key, st in self.states.items()),
+                ((key[0], score_at(st, self.params, now)) for key, st in self.states.items()),
                 key=lambda kv: (-kv[1], kv[0]),
             )[:20]
         return {
@@ -416,13 +584,23 @@ class Engine:
 
 _ENGINE = None
 _ENGINE_LOCK = threading.Lock()
+_ENGINE_STOPPING = threading.Event()
 
 
 def get_engine() -> Engine:
     """Process-wide lazy singleton on the fixed production paths."""
     global _ENGINE
-    if _ENGINE is None:
-        with _ENGINE_LOCK:
-            if _ENGINE is None:
-                _ENGINE = Engine(DB_PATH, LEMMA_PATH)
-    return _ENGINE
+    with _ENGINE_LOCK:
+        if _ENGINE_STOPPING.is_set():
+            raise RuntimeError('dictionary service is stopping')
+        if _ENGINE is None:
+            _ENGINE = Engine(DB_PATH, LEMMA_PATH)
+        return _ENGINE
+
+
+def close_dictionary_on_shutdown():
+    """Reject late warmup and drain initialization before releasing the lookup."""
+    _ENGINE_STOPPING.set()
+    with _ENGINE_LOCK:
+        if _ENGINE is not None:
+            _ENGINE._close_translation_lookup()

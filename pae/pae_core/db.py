@@ -182,11 +182,13 @@ def append_event(conn, type, payload, idem_key=None, source="api", autocommit=Tr
     return event_id
 
 
-def load_events(conn, since_ts=0) -> list:
-    """All events with ts >= since_ts, in (ts, rowid) order."""
+def load_events(conn, since_ts=0, *, include_visible_opportunity=True) -> list:
+    """Events in (ts, rowid) order; full log unless observation exclusion is requested."""
+    query = "SELECT ts, type, payload, idem_key FROM events WHERE ts >= ?"
+    if not include_visible_opportunity:
+        query += " AND type != 'visible_opportunity'"
     rows = conn.execute(
-        "SELECT ts, type, payload, idem_key FROM events"
-        " WHERE ts >= ? ORDER BY ts ASC, rowid ASC",
+        query + " ORDER BY ts ASC, rowid ASC",
         (int(since_ts),),
     ).fetchall()
     out = []

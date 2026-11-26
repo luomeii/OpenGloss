@@ -248,11 +248,12 @@ def propose(conn, actor, patch, rationale="", evidence=None, ttl_days=None):
         gate.append("impact: high-impact ok (step<=20%%, daily<=%d)" % HIGH_IMPACT_DAILY_LIMIT)
 
     now = _now()
+    manual_page_cap = is_user and len(accepted) == 1 and accepted[0][0] == "max_ann_per_page"
     for key, _ in accepted:
         row = conn.execute(
             "SELECT ts FROM decisions WHERE actor = ? AND applied = 1 AND patch LIKE ? ORDER BY ts DESC LIMIT 1",
             (actor, "%" + key + "%")).fetchone()
-        if row and now - row[0] < PROPOSE_COOLDOWN_S:
+        if row and now - row[0] < PROPOSE_COOLDOWN_S and not manual_page_cap:
             return False, {"decision_id": did, "applied": False,
                            "gate_result": "conflict: %s 在冷却期内（%d 秒前改过同键）" % (key, now - row[0])}
     gate.append("conflict: ok")

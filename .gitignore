@@ -1,6 +1,7 @@
 # 运行时数据（学习账本）
 pae/pae.db*
 pae/keys.json
+pae/user_controls.json
 
 # autostart_on.bat 在本机生成的隐藏启动器（内容是本机绝对路径，不入库）
 autostart_hidden.vbs

@@ -5,6 +5,8 @@
 """
 import json
 import time
+from .fold import score_at
+from .contacts import SELECTED_TYPES
 
 
 def _payload(row):
@@ -35,7 +37,7 @@ def compute(conn, days=7, min_exposure=3, top_n=10):
     for ts, etype, payload in rows:
         p = _payload((ts, etype, payload))
         lemma = p.get("lemma") or p.get("lemma_id") or ""
-        if etype == "encounter":
+        if etype in SELECTED_TYPES:
             enc += 1
             if lemma:
                 lemmas_seen.add(lemma)
@@ -55,7 +57,7 @@ def compute(conn, days=7, min_exposure=3, top_n=10):
     first_seen = {}
     for ts, lemma in conn.execute(
             "SELECT MIN(ts), json_extract(payload, '$.lemma') FROM events"
-            " WHERE type='encounter' GROUP BY json_extract(payload, '$.lemma')"):
+            " WHERE type IN (?,?) GROUP BY json_extract(payload, '$.lemma')", SELECTED_TYPES):
         if lemma:
             first_seen[lemma] = ts
     new_lemmas = [w for w, ts in first_seen.items() if ts and ts >= since]
@@ -98,11 +100,12 @@ def compute(conn, days=7, min_exposure=3, top_n=10):
 
 def band_population(states, params):
     """学习带分布：带下(新词) / 带内 / 带上(熟词)。"""
+    now = int(time.time())
     lo = params.get("band_lo", 0.10)
     hi = params.get("band_hi", 0.55)
     out = {"below_band": 0, "in_band": 0, "above_band": 0, "total": 0}
     for st in states.values():
-        s = st.s_value(params)
+        s = score_at(st, params, now)
         out["total"] += 1
         if s < lo:
             out["below_band"] += 1

@@ -53,7 +53,7 @@ $elog = Join-Path $here 'engine-start.err.log'
 Write-Host ('[PAE] starting the engine with the bundled Python: ' + $py)
 Write-Host '[PAE] first start loads a 65 MB dictionary; a slow machine can take a while.'
 $proc = Start-Process -FilePath $py `
-    -ArgumentList '-m','uvicorn','pae_core.api:app','--port',"$Port" `
+    -ArgumentList '-m','uvicorn','pae_core.api:app','--host','127.0.0.1','--port',"$Port" `
     -WorkingDirectory $here -WindowStyle Hidden -PassThru `
     -RedirectStandardOutput $log -RedirectStandardError $elog
 
