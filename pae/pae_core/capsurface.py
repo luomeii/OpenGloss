@@ -602,7 +602,8 @@ def _dispatch(name: str, params: dict, actor: str = "local"):
                     if isinstance(fbody, dict):
                         remembered.update(fbody)
         if not reply:
-            reply = "记下了。"
+            reply = ("记下了。" if isinstance(remembered, dict) and remembered.get("ok") is True
+                     else "这次没有收到可显示的回复，请再试一次。")
         # 说出的话必须落库，否则「下一轮记得上一轮」没有数据源（见 _remember_turns 的说明）
         try:
             _remember_turns(get_engine().conn, stimulus, reply)

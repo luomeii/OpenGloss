@@ -10,6 +10,7 @@ import socket
 import sqlite3
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -53,7 +54,7 @@ class HttpWriteSourceTests(unittest.IsolatedAsyncioTestCase):
         self.stack.enter_context(patch.dict(os.environ, env, clear=True))
         self.stack.enter_context(patch.object(socket.socket, 'bind', side_effect=AssertionError('no bind')))
         self.stack.enter_context(patch.object(socket.socket, 'connect', side_effect=AssertionError('no connect')))
-        self.stack.enter_context(patch('urllib.request.urlopen', side_effect=AssertionError('no provider')))
+        self.stack.enter_context(patch('urllib.request.build_opener', side_effect=AssertionError('no provider')))
         dictionary = self.work / 'dict.sqlite'
         with closing(sqlite3.connect(dictionary)) as conn:
             conn.execute('CREATE TABLE dict_words(word TEXT PRIMARY KEY,translation TEXT,bnc INTEGER)')
@@ -548,7 +549,7 @@ class HttpWriteSourceTests(unittest.IsolatedAsyncioTestCase):
             calls.append(True)
             return io.BytesIO(json.dumps({'choices': [{'message': {
                 'content': 'synthetic reply'}}]}).encode())
-        with patch('urllib.request.urlopen', side_effect=provider):
+        with patch('urllib.request.build_opener', return_value=types.SimpleNamespace(open=provider)):
             await self.assert_rejected('/v1/cap/pae.persona.say', {
                 'stimulus': 'synthetic-only'}, origin=FOREIGN, site='cross-site')
         self.assertEqual(calls, [])
@@ -559,7 +560,7 @@ class HttpWriteSourceTests(unittest.IsolatedAsyncioTestCase):
             calls.append(True)
             return io.BytesIO(json.dumps({'choices': [{'message': {
                 'content': 'synthetic reply'}}]}).encode())
-        with patch('urllib.request.urlopen', side_effect=provider):
+        with patch('urllib.request.build_opener', return_value=types.SimpleNamespace(open=provider)):
             status, result = await self.call('/v1/cap/pae.persona.say', {
                 'stimulus': 'synthetic-only'}, origin=EXTENSION)
             self.assertEqual(status, 500, result)

@@ -29,7 +29,7 @@ for _s in (sys.stdin, sys.stdout):
 BASE = os.environ.get("PAE_BASE", "http://127.0.0.1:4815").rstrip("/")
 KEY = os.environ.get("PAE_KEY", "")
 PROTOCOL = "2024-11-05"
-SERVER = {"name": "pae", "version": "0.3.0"}
+SERVER = {"name": "pae", "version": "0.4.1"}
 
 
 def _http(path, body=None, method=None):

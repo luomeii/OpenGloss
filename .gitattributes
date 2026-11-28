@@ -1,10 +1,15 @@
-# 冻结内核（state/fold/lemmatize）的哈希是按原始字节校验的——
-# 若被 CRLF 检出，t13_conformance 会全线失败。强制 LF。
+# Preserve locked source bytes across Git checkouts and source archives.
+# Frozen Python/JavaScript cores keep LF; existing mixed-EOL files below
+# are explicit exceptions, not normalized as part of a release build.
+* -text
 *.py   text eol=lf
 *.js   text eol=lf
 *.json text eol=lf
 *.md   text eol=lf
 *.txt  text eol=lf
 
-# Windows 批处理保持 CRLF
-*.bat  text eol=crlf
+# Batch files already have reviewed LF or CRLF bytes. Preserve both.
+*.bat -text
+pae/extension/content.js -text
+pae/extension/sw.js -text
+pae/tests/test_http_write_source.py -text

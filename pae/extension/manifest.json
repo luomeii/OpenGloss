@@ -2,19 +2,42 @@
   "manifest_version": 3,
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0zpsurvh4PllfVRwYd5jbeRtsauSg0ls5Vjozt7BQj3hhgO9vo8rb2efErGhXD7zE7Ux4vDVWgo3YA7p2LNUrlILu+SgXbQu7kHcF+W/6Bc3TjYVKL26WwSEe573qaAT7XDALKwyWafNyWhoR9cZYb+nPlu2zNwJ79CVKnEzbqslT5yXUPZldjjj8KH+BwO+nBGAkR8jRUHmuVZTJ1itcq0FiA1dyx6LRJRaopjwTCDFiOfVox1KOMiRZ0Xj+jgmcYsvHLuno3lP4Rh/1smkCF/azPEMfTc/pPjeqq4EFvbnPQ0w8CAmtCjNnXAuVryAgg1A2xJfP2mkKIBSONei0QIDAQAB",
   "name": "OpenGloss",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "读英文网页时自动标注生词，词汇在阅读里自然积累（本地优先，零遥测）",
-  "permissions": ["storage", "scripting"],
-  "action": { "default_popup": "popup.html" },
-  "host_permissions": ["http://127.0.0.1:4815/*", "<all_urls>"],
-  "content_scripts": [{
-    "matches": ["<all_urls>"],
-    "js": ["content.js"],
-    "run_at": "document_idle"
-  }],
-  "web_accessible_resources": [{
-    "resources": ["character-frame.html"],
-    "matches": ["<all_urls>"]
-  }],
-  "background": { "service_worker": "sw.js" }
+  "permissions": [
+    "storage",
+    "scripting"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "host_permissions": [
+    "http://127.0.0.1:4815/*",
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "character-frame.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "version_name": "0.4.1"
 }

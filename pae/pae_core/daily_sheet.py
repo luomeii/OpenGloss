@@ -116,18 +116,34 @@ def build_daily_sheet(events_path, dictionary_path, start_ts: int, end_ts: int) 
 
 
 def render_daily_sheet(day_text: str, sheet: dict) -> str:
-    """Render a print-friendly page without scripts, requests or raw event payloads."""
+    """Render escaped cards; optional local script handles paging/printing only."""
     cards = []
-    for row in sheet["rows"]:
+    focus = []
+    suggested = 0
+    for index, row in enumerate(sheet["rows"]):
         lemma = escape(row["lemma"])
         translation = escape(row["translation"])
         status = escape(row["dictionary_status"])
         seen_at = time.strftime("%H:%M", time.localtime(row["last_ts"]))
         hint = '<span class="hint">建议先回顾（展示提示）</span>' if row["review_hint"] else ""
         known = "今日记录过“认识了”反馈" if row["known"] else "今日未记录该反馈"
+        basis = ("今日记录过认识反馈" if row["known"] else
+                 "主动悬停，今日未记录认识反馈" if row["hovers"] else
+                 "多次系统选中，未记录悬停" if row["encounters"] >= 2 else
+                 "仅系统选中，未记录悬停")
+        initial = bool(row["review_hint"] and suggested < 10)
+        if initial:
+            suggested += 1
+            focus.append(f'<article class="focus-card"><h3>{lemma}</h3><p>{translation}</p>'
+                         f'<small>{basis}</small> '
+                         f'<a href="#word-{index}" data-jump="{index}">查看并选择</a></article>')
+        checked = " checked" if initial else ""
         cards.append(
-            f'<article><h2>{lemma} {hint}</h2><p><b>中译：</b>{translation}</p>'
+            f'<article class="word-card" id="word-{index}" data-suggested="{str(initial).lower()}">'
+            f'<label class="selection"><input type="checkbox"{checked}>加入打印：{lemma}</label>'
+            f'<h2>{lemma} {hint}</h2><p><b>中译：</b>{translation}</p>'
             f'<p><b>英解：</b>未提供　<b>词性：</b>未提供</p>'
+            f'<p class="basis">回顾依据：{basis}</p>'
             f'<small>系统记录 {row["encounters"]} 次 · 主动悬停 {row["hovers"]} 次 · '
             f'{known} · 最后选中 {seen_at} · {status}</small></article>'
         )
@@ -139,5 +155,6 @@ def render_daily_sheet(day_text: str, sheet: dict) -> str:
     return Template(_TEMPLATE.read_text(encoding="utf-8")).substitute(
         date=escape(day_text), summary=summary,
         cards="\n".join(cards) or '<p class="empty">这一天没有已记录的选词。</p>',
+        focus="\n".join(focus) or '<p class="empty">今日没有符合现有回顾提示的词，可在完整清单自行选择。</p>',
         diagnostics=diagnostics,
     )

@@ -51,7 +51,7 @@ if ($h -and $h.ok -and $h.db) {
 $log  = Join-Path $here 'engine-start.log'
 $elog = Join-Path $here 'engine-start.err.log'
 Write-Host ('[PAE] starting the engine with the bundled Python: ' + $py)
-Write-Host '[PAE] first start loads a 65 MB dictionary; a slow machine can take a while.'
+Write-Host '[PAE] Starting and checking the local dictionary; please wait for engine ready.'
 $proc = Start-Process -FilePath $py `
     -ArgumentList '-m','uvicorn','pae_core.api:app','--host','127.0.0.1','--port',"$Port" `
     -WorkingDirectory $here -WindowStyle Hidden -PassThru `
@@ -98,7 +98,7 @@ if ($proc -and -not $proc.HasExited) {
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
 }
 Write-Host 'Common causes:'
-Write-Host '  1. the ZIP was not fully extracted (should be about 548 files)'
+Write-Host '  1. the ZIP was not fully extracted; extract the complete archive'
 Write-Host '  2. a leftover engine on the same port from another folder'
 Write-Host '  3. antivirus blocking the bundled python.exe'
 Write-Host '  4. the path is on a network drive or a read-only location'

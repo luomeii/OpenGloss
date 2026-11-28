@@ -608,6 +608,7 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
   }
   if (msg && msg.type === 'PAE_CHAR_SAY') {
     (async function () {
+      var failedHint = '这次聊天未完成，请检查引擎和管理页的AI连接设置后再试。';
       try {
         // 2026-10-03 二次反馈修复：以前这里自己拼一份 metrics 数字当 context_block 传上去，
         // 引擎的自动装配（「我记得」事实卡 + 学习带 + 样本不足护栏）在生产路径上是死代码。
@@ -617,9 +618,23 @@ chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
           body: JSON.stringify({ stimulus: msg.text || '（用户点了你一下）' })
         });
         var j2 = await r2.json();
-        sendResponse({ ok: true, reply: ((j2.result || {}).reply) || '', error: j2.error });
+        if (!r2.ok || !j2 || j2.ok !== true) {
+          var hint = failedHint;
+          if (j2 && j2.error === 'RuntimeError: AI call disabled for this action')
+            hint = 'AI总控未开启，请到管理页开启后再试。';
+          else if (j2 && j2.error === 'RuntimeError: no LLM key configured')
+            hint = '尚未配置AI密钥，请到管理页填写并保存连接设置后再试。';
+          sendResponse({ ok: false, error: hint });
+          return;
+        }
+        var reply = j2.result && j2.result.reply;
+        if (typeof reply !== 'string' || !reply.trim()) {
+          sendResponse({ ok: false, error: '这次没有收到可显示的回复，请再试一次。' });
+          return;
+        }
+        sendResponse({ ok: true, reply: reply });
       } catch (e) {
-        sendResponse({ ok: false, error: String((e && e.message) || e) });
+        sendResponse({ ok: false, error: failedHint });
       }
     })();
     return true;

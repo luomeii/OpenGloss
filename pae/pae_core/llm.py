@@ -90,6 +90,50 @@ def public_provider():
     }
 
 
+def _chat_endpoint(base):
+    """Accept an HTTP(S) root, /v1 base or complete chat endpoint without retries."""
+    base = base.rstrip("/")
+    try:
+        parsed = urlsplit(base)
+        compatible = (parsed.scheme in ("http", "https") and parsed.hostname
+                      and parsed.username is None and parsed.password is None
+                      and not parsed.query and not parsed.fragment)
+        # Invalid legacy ports retain the previous construction/failure behavior.
+        parsed.port
+    except ValueError:
+        compatible = False
+    if compatible:
+        if parsed.path.endswith("/chat/completions"):
+            return base
+        if parsed.path.endswith("/v1"):
+            return base + "/chat/completions"
+    return base + "/v1/chat/completions"
+
+
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep AI credentials within the configured origin; never change global state."""
+
+    @staticmethod
+    def _origin(url):
+        try:
+            parsed = urlsplit(url)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None):
+                return None
+            port = parsed.port
+            if port is None:
+                port = 443 if parsed.scheme == "https" else 80
+            return parsed.scheme, parsed.hostname, port
+        except ValueError:
+            return None
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        source, target = self._origin(req.full_url), self._origin(newurl)
+        if source is None or target is None or source != target:
+            raise RuntimeError("AI endpoint redirect blocked; configure the final API URL")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def chat(messages, temperature=0.7, timeout=90, max_tokens=None, thinking=None, purpose=None):
     """OpenAI 兼容 chat。thinking: None=读配置 / True=开 / False=关（实测关掉快 3 倍，见
     tests/artifacts/thinking_probe.json：1.29s→0.44s，reasoning_tokens 33→0）。
@@ -108,13 +152,13 @@ def chat(messages, temperature=0.7, timeout=90, max_tokens=None, thinking=None, 
     elif mode is False or mode == "disabled":
         payload["thinking"] = {"type": "disabled"}
     req = urllib.request.Request(
-        p["base"].rstrip("/") + "/v1/chat/completions",
+        _chat_endpoint(p["base"]),
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + p["key"]},
     )
     if not user_controls.allowed(purpose or current_purpose()):
         raise RuntimeError("AI call disabled for this action")
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.build_opener(_SameOriginRedirectHandler()).open(req, timeout=timeout) as r:
         j = json.loads(r.read().decode("utf-8"))
     msg = (j.get("choices") or [{}])[0].get("message") or {}
     return {

@@ -36,9 +36,12 @@ details{margin-top:12px;border-top:1px solid #e3eae1;padding-top:12px}summary{cu
 <p class="hint">关闭总控会阻止新的模型请求；已经发出的请求可能继续返回。</p>
 <div class="grid"><div><label for="base">API 地址</label><input id="base" type="url" autocomplete="off" placeholder="https://api.example.com"><p id="baseSource" class="hint"></p></div>
 <div><label for="model">模型名称</label><input id="model" type="text" autocomplete="off" placeholder="模型 ID"><p id="modelSource" class="hint"></p></div></div>
-<p class="hint">地址填写服务根地址；引擎会追加 /v1/chat/completions。留空沿用已有配置；环境变量优先于本页设置。</p>
+<p class="hint">地址可填服务根地址、末尾 /v1 的地址或完整 /chat/completions 接口；代理前缀会保留。留空沿用已有配置；环境变量优先于本页设置。</p>
 <label for="key">API 密钥</label><div class="row"><input id="key" type="password" autocomplete="new-password" placeholder="留空则保留已有设置"><button id="clearKey" class="btn" type="button">清除已存密钥</button></div>
 <p id="keyState" class="hint"></p>
+<div class="row"><button id="saveAi" class="btn primary" type="button">保存连接与总控</button><span id="aiMsg" class="msg" aria-live="polite"></span></div>
+<p id="aiState" class="hint" aria-live="polite">尚未读取已保存的 AI 总控状态。</p>
+<p class="hint">本按钮只保存连接与总控，不提交下面的后台设置，也不会测试或调用模型。编辑后需再次保存；实际连接仍以页面显示的配置来源为准。</p>
 <details><summary>后台与主动提醒</summary>
 <label class="toggle"><input id="shadow_ai_enabled" type="checkbox">允许悬停后的后台义项实验调用 AI</label>
 <label class="toggle"><input id="proactive_enabled" type="checkbox">允许主动提醒（规则模板也会说话）</label>
@@ -46,27 +49,55 @@ details{margin-top:12px;border-top:1px solid #e3eae1;padding-top:12px}summary{cu
 <label for="proactive_gap_minutes">两次主动提醒最短间隔（分钟）</label><input id="proactive_gap_minutes" type="number" min="30" max="1440" step="1" style="max-width:110px">
 <p class="hint">还有既有曝光门槛和每日上限。这里的间隔只能延长，不能缩短原来的 30 分钟。</p>
 <label class="toggle"><input id="scheduled_ai_enabled" type="checkbox">允许已启用的定时巡检调用 AI</label>
-<p class="hint">此项只是许可；定时巡检本身仍遵循原配置，默认未启用。</p></details>
-<div class="row"><button id="saveAi" class="btn primary">保存 AI 设置</button><span id="aiMsg" class="msg" aria-live="polite"></span></div>
+<p class="hint">此项只是许可；定时巡检本身仍遵循原配置，默认未启用。</p>
+<div class="row"><button id="saveBackground" class="btn" type="button">保存后台与提醒</button><span id="backgroundMsg" class="msg" aria-live="polite"></span></div>
+<p id="backgroundState" class="hint" aria-live="polite">尚未读取已保存的后台设置。</p>
+<p class="hint">本按钮不保存上面的连接与总控。后台 AI 还需要已保存的总控许可；规则提醒由主动提醒开关和静音等既有条件控制。</p></details>
 </section></div></main>
 <script>
 const $=id=>document.getElementById(id);
 const flags=['ai_enabled','shadow_ai_enabled','proactive_enabled','proactive_ai_enabled','scheduled_ai_enabled'];
+const backgroundFlags=flags.filter(f=>f!=='ai_enabled');
+let aiSavePending=false;
+let aiSaveRevision=0;
 const sourceName=s=>({environment:'环境变量',user:'本页设置',config:'原配置或默认值'}[s]||s);
-async function call(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=await r.json();if(!r.ok||j.ok===false)throw new Error(j.error||j.detail||'设置未生效');return j}
+async function call(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});let j=await r.json();if(!r.ok||j.ok===false){const e=new Error(j.detail||j.error||'设置未生效');e.saveRejected=['invalid_or_unwritable_settings','local_origin_required'].includes(j.error);throw e;}return j}
 function message(id,text,bad=false){$(id).textContent=text;$(id).className='msg'+(bad?' bad':'')}
-async function refresh(){try{const r=await fetch('/v1/manage',{cache:'no-store'});if(!r.ok)throw Error('读取失败');const s=await r.json();
+function showAiState(ai,provider){
+ $('aiState').textContent='已保存的 AI 总控：'+(ai.ai_enabled?'开启':'关闭')+'；填写框中的未保存修改尚未生效。';
+ const enabled=v=>v?'开启':'关闭';
+ $('backgroundState').textContent='已保存：后台义项 '+enabled(ai.shadow_ai_enabled)+'；主动提醒 '+enabled(ai.proactive_enabled)+'；提醒 AI '+enabled(ai.proactive_ai_enabled)+'；定时 AI '+enabled(ai.scheduled_ai_enabled)+'；间隔 '+ai.proactive_gap_minutes+' 分钟。';
+ $('base').placeholder=provider.base||'https://api.example.com';$('model').placeholder=provider.model||'模型 ID';
+ $('baseSource').textContent='当前来源：'+sourceName(provider.base_source);$('modelSource').textContent='当前来源：'+sourceName(provider.model_source);
+ $('keyState').textContent='有效密钥：'+(provider.key_configured?'已配置':'未配置')+'（来源：'+sourceName(provider.key_source)+'；密钥不会回显）';
+}
+async function refresh(loadAiInputs=false){const revision=aiSaveRevision,readAiState=!aiSavePending;try{const r=await fetch('/v1/manage',{cache:'no-store'});if(!r.ok)throw Error('读取失败');const s=await r.json();
  $('engine').textContent=s.engine==='ready'?'引擎已就绪':s.engine==='learning_write_paused'?'学习写入已暂停':'引擎未就绪';$('engine').classList.toggle('off',s.engine!=='ready');
  if(s.max_ann_per_page!=null)$('cap').value=s.max_ann_per_page;$('mute').checked=!!s.muted;
- for(const f of flags)$(f).checked=!!s.ai[f];$('proactive_gap_minutes').value=s.ai.proactive_gap_minutes;
- $('base').value=s.ai.base||'';$('base').placeholder=s.provider.base||'https://api.example.com';$('model').value=s.ai.model||'';$('model').placeholder=s.provider.model||'模型 ID';
- $('baseSource').textContent='当前来源：'+sourceName(s.provider.base_source);$('modelSource').textContent='当前来源：'+sourceName(s.provider.model_source);
- $('keyState').textContent='有效密钥：'+(s.provider.key_configured?'已配置':'未配置')+'（来源：'+sourceName(s.provider.key_source)+'；密钥不会回显）';
+ const currentAi=readAiState&&!aiSavePending&&revision===aiSaveRevision;
+ if(loadAiInputs&&currentAi){for(const f of flags)$(f).checked=!!s.ai[f];$('proactive_gap_minutes').value=s.ai.proactive_gap_minutes;
+ $('base').value=s.ai.base||'';$('model').value=s.ai.model||'';}
+ if(currentAi)showAiState(s.ai,s.provider);
  }catch(e){message('readingMsg','读取状态失败，请确认独立引擎正在运行',true)}}
 $('saveCap').onclick=async()=>{const n=Number($('cap').value);if(!Number.isInteger(n)||n<8||n>80){message('readingMsg','上限需为 8–80 的整数',true);return}try{await call('/v1/manage/page-cap',{max_ann_per_page:n});message('readingMsg','上限已保存');await refresh()}catch(e){message('readingMsg','上限未生效：'+e.message,true);await refresh()}};
 $('mute').onchange=async()=>{try{await call('/v1/manage/mute',{muted:$('mute').checked});message('readingMsg',$('mute').checked?'已静音':'已取消静音')}catch(e){message('readingMsg','静音设置失败：'+e.message,true);await refresh()}};
-$('clearKey').onclick=async()=>{try{await call('/v1/manage/ai',{clear_key:true});$('key').value='';message('aiMsg','已清除本页保存的密钥');await refresh()}catch(e){message('aiMsg','清除失败：'+e.message,true)}};
-$('saveAi').onclick=async()=>{const body={base:$('base').value.trim(),model:$('model').value.trim(),proactive_gap_minutes:Number($('proactive_gap_minutes').value)};for(const f of flags)body[f]=$(f).checked;if($('key').value)body.key=$('key').value;
- try{await call('/v1/manage/ai',body);$('key').value='';message('aiMsg','设置已保存；未发起模型请求');await refresh()}catch(e){message('aiMsg','保存失败：'+e.message,true)}};
-refresh();
+async function saveAiSettings(body,target,success,afterSave=()=>{}){
+ if(aiSavePending)return;aiSavePending=true;aiSaveRevision++;
+ for(const id of ['saveAi','saveBackground','clearKey'])$(id).disabled=true;
+ message(target,'正在保存…');
+ try{const s=await call('/v1/manage/ai',body);afterSave();showAiState(s.ai,s.provider);message(target,success+'；未发起模型请求');}
+ catch(e){message(target,e.saveRejected?'保存失败：'+e.message:'无法确认是否保存，请重新打开页面核对已保存状态；当前填写内容保留。',true);}
+ finally{aiSavePending=false;for(const id of ['saveAi','saveBackground','clearKey'])$(id).disabled=false;}
+}
+$('clearKey').onclick=()=>saveAiSettings({clear_key:true},'aiMsg','已清除本页保存的密钥；环境变量不受影响');
+$('saveAi').onclick=()=>{const body={base:$('base').value.trim(),model:$('model').value.trim(),ai_enabled:$('ai_enabled').checked};
+ const submittedKey=$('key').value;if(submittedKey)body.key=submittedKey;
+ return saveAiSettings(body,'aiMsg','连接与总控已保存',()=>{if(submittedKey&&$('key').value===submittedKey)$('key').value='';});
+};
+$('saveBackground').onclick=()=>{if(aiSavePending)return;const n=Number($('proactive_gap_minutes').value);
+ if(!Number.isInteger(n)||n<30||n>1440){message('backgroundMsg','提醒间隔需为 30–1440 分钟的整数；本次未保存',true);$('proactive_gap_minutes').focus();return;}
+ const body={proactive_gap_minutes:n};for(const f of backgroundFlags)body[f]=$(f).checked;
+ return saveAiSettings(body,'backgroundMsg','后台与提醒已保存');
+};
+refresh(true);
 </script></body></html>

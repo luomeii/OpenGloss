@@ -18,7 +18,7 @@
 | 能力 | 类型 | scope | HTTP | 说明 |
 |---|---|---|---|---|
 | `pae.health` | observe | read | GET /v1/health | 引擎存活检查 |
-| `pae.annotate` | observe | read | POST /v1/annotate | 给一段文本返回注解（含记账：写入 encounter 事件） |
+| `pae.annotate` | observe | read | POST /v1/annotate | 给一段文本返回注解并记录 contact_selected_v1 接触事实；不直接增加学习证据 |
 | `pae.status` | observe | read | GET /v1/status | 学习状态总览（事件数/词表规模/高频掌握词） |
 | `pae.config` | observe | read | GET /v1/config | 当前生效配置（只读） |
 | `pae.event` | inform | write | POST /v1/event | 上报观察/交互事件（annotation_shown / hover / known_click）——三证据的发射口 |

@@ -878,8 +878,9 @@ const SESSION_ID = (function () {
       const text = data.text.trim();
       appendCharacterTurn('user', text);
       requestCharacter('PAE_CHAR_SAY', { text: text }, (result) => {
-        const reply = result ? (result.reply || '（它没说话）' + (result.error || '')) :
-          '引擎没在跑，我暂时说不了话。';
+        const reply = result && result.ok === true && typeof result.reply === 'string' && result.reply.trim()
+          ? result.reply : (result && typeof result.error === 'string' && result.error.trim()
+            ? result.error : '这次聊天未完成，请检查引擎和管理页的AI连接设置后再试。');
         notifyCharacter(reply, 'reply');
       });
     }
@@ -892,7 +893,7 @@ const SESSION_ID = (function () {
     const slot = { surface: surface, frame: frame, ready: false, token: null, documentId: null, port: null };
     characterFrames.set(surface, slot);
     frame.title = { quick: '小 P', side: '小 P 侧栏', bubble: '小 P 气泡', margin: '小 P 边注', word: 'OpenGloss 词卡' }[surface];
-    frame.style.cssText = 'position:fixed;border:0;background:transparent;max-width:calc(100vw - 16px);padding:0;margin:0';
+    frame.style.cssText = 'position:fixed;border:0;background:transparent;max-width:calc(100vw - 16px);padding:0;margin:0;color-scheme:normal';
     if (surface === 'side') frame.style.cssText += ';top:0;right:0;width:min(360px,100vw);height:100vh;max-width:none';
     else if (surface === 'margin') frame.style.cssText += ';width:284px;height:160px';
     else if (surface === 'word') frame.style.cssText += ';width:276px;height:104px';

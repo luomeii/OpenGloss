@@ -1,6 +1,6 @@
 {
-  "version": "0.3.0",
-  "generated": "2026-10-01",
+  "version": "0.4.1",
+  "generated": "2026-11-28",
   "note": "PAE 能力面单一真相源。内置 companion 与外部智能体（Claude Code / Cursor / 其他 MCP 客户端 / 你的脚本）走同一份清单、同一套守门、同一份配额。status=planned 的能力只有设计没有实现——这是防「图纸当房子」的诚实标注。",
   "transports": [
     {
@@ -50,7 +50,7 @@
       "status": "implemented",
       "scope": "read",
       "side_effect": "appends_events",
-      "description": "给一段文本返回注解（含记账：写入 encounter 事件）",
+      "description": "给一段文本返回注解并记录 contact_selected_v1 接触事实；不直接增加学习证据",
       "params": {
         "text": {
           "type": "string",
@@ -271,7 +271,7 @@
           "required": true
         }
       },
-      "returns": "{lemma, s_value, encounters, gloss, in_band}",
+      "returns": "{lemma, s_value, encounters, gloss, band}",
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.word"
@@ -393,7 +393,7 @@
           "default": "7d"
         }
       },
-      "returns": "{encounters_7d, new_lemmas_7d, band_population, annotation_exposure, hover_rate, click_rate, budget_utilization, top_ignored_words}",
+      "returns": "{encounters_7d, new_lemmas_7d, annotation_exposure, hover_rate, click_rate, budget_utilization, top_ignored_words}",
       "http": {
         "method": "POST",
         "path": "/v1/cap/pae.metrics"

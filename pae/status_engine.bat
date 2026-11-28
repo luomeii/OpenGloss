@@ -6,7 +6,7 @@ rem application/json body as ISO-8859-1, so a db path containing non-ASCII
 rem characters comes back as mojibake and every comparison fails. We read the
 rem RAW bytes and decode them as UTF-8 ourselves.
 rem NOTE 2: /v1/health really touches the engine, and a cold engine spends
-rem ~25s loading the 65 MB dictionary, so the timeout below must exceed that.
+rem extra time opening and checking the dictionary; allow for that below.
 rem NOTE 3: a 503 is NOT 'down' -- it means the engine is running but could
 rem not build (missing or corrupt dictionary). Its body carries the reason.
 rem

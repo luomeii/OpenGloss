@@ -241,7 +241,7 @@ class Engine:
                 if _repeat:
                     return 0
                 # M12-C：3 天内点过「认识了」的词压到最低优先（当天安静）；
-                # 但仍在 chosen 候选里（预算富余时照记账——E 继续涨，3 天后不诈尸）
+                # 仍在 chosen 候选里；预算富余时只记接触事实，不直接增加学习证据。
                 _stx = self.states.get((_c[0], 0))
                 if _stx is not None and _stx.t_known is not None and (_now_ts - _stx.t_known) < _suppress_s:
                     return 0

@@ -2,7 +2,7 @@
 name: pae-bridge
 description: 接入用户本地的 PAE 英语习得引擎（localhost:4815）。当任务涉及英文阅读/写作、
   用户英语学习状态、或需要按他的学习数据调整辅助强度时使用。
-metadata: { pae_api: "0.3" }
+metadata: { pae_api: "0.4" }
 ---
 
 # PAE Bridge
@@ -48,7 +48,7 @@ PAE 是用户本机的一个**被动英语习得引擎**：他平时读英文技
 | 能力 | 作用 |
 |---|---|
 | `pae.health` | 引擎存活检查 |
-| `pae.annotate` | 给一段文本返回注解（含记账：写入 encounter 事件） |
+| `pae.annotate` | 给一段文本返回注解并记录 contact_selected_v1 接触事实；不直接增加学习证据 |
 | `pae.status` | 学习状态总览（事件数/词表规模/高频掌握词） |
 | `pae.config` | 当前生效配置（只读） |
 | `pae.persona` | 读取人格参数与渲染后的提示词——外部智能体扮演同一角色所必需 |

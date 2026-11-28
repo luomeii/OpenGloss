@@ -130,8 +130,8 @@ def health(resp: Response):
         if (isinstance(e, FileNotFoundError) or "no such table" in low
                 or "file is not a database" in low or "unable to open database" in low
                 or "no such file" in low):
-            hint = ("词典缺失或损坏：请按 README 第 1 步，把 dict.sqlite 放到 resources/ECDICT/ 下"
-                    "（约 65 MB，不在 git 仓库里，需从 Releases 下载）")
+            hint = ("词典缺失或损坏：请确认 resources/ECDICT/dict.sqlite 存在且完整。"
+                    "离线安装用户请重新解压完整安装包；从源码运行的用户请按 README 的源码运行说明获取词典。")
         else:
             hint = ""
         return {"ok": False, "db": _DB, "error": msg, "hint": hint}
@@ -366,6 +366,18 @@ b{color:#d97706}</style></head><body>
 
 _DAILY_HEADERS = {"Cache-Control": "no-store", "X-Frame-Options": "DENY",
                   "X-Content-Type-Options": "nosniff"}
+DAILY_SCRIPT = Path(__file__).resolve().parents[1] / "daily_sheet.js"
+
+
+@app.get("/daily-sheet.js")
+def daily_sheet_script():
+    """Serve only the bundled daily-sheet script; never resolve user paths."""
+    try:
+        script = DAILY_SCRIPT.read_bytes()
+    except OSError:
+        return Response("今日识单操作脚本暂时无法读取", status_code=503,
+                        media_type="text/plain", headers=_DAILY_HEADERS)
+    return Response(script, media_type="text/javascript", headers=_DAILY_HEADERS)
 
 
 def _daily_data(day_text: str):
@@ -390,7 +402,7 @@ def daily_sheet_json(date: str = ""):
 
 @app.get("/daily", response_class=HTMLResponse)
 def daily_sheet_page(date: str = ""):
-    """Print-friendly local page. No script, tracking, or learning-state writes."""
+    """Local read-only list with bundled paging/printing; no learning-state writes."""
     try:
         selected, sheet = _daily_data(date)
         page = render_daily_sheet(selected, sheet)
@@ -401,7 +413,7 @@ def daily_sheet_page(date: str = ""):
         return HTMLResponse("<h1>今日识单暂时无法读取</h1>", status_code=503,
                             headers=_DAILY_HEADERS)
     return HTMLResponse(page, headers={**_DAILY_HEADERS,
-                        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"})
+                        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'"})
 
 
 @app.get("/panel", response_class=HTMLResponse)
@@ -494,6 +506,37 @@ def manage_state():
     return JSONResponse(state, headers=_MANAGE_HEADERS)
 
 
+def _manage_ai_save_error(body, error):
+    """Explain save failures without returning exception text or submitted values."""
+    result = {"error": "invalid_or_unwritable_settings"}
+    if isinstance(error, OSError):
+        return {**result, "reason": "settings_unwritable", "detail":
+                "设置文件写入失败，本次未保存；原设置保持不变，请检查安装目录是否可写。"}
+    try:
+        user_controls._validate(body)
+    except ValueError:
+        hints = {
+            "base": "API 地址需为有效的 http(s) 根地址，不含账号、查询参数或片段。",
+            "model": "模型名称需为不超过 2048 个字符的文本，不能只含空白。",
+            "key": "API 密钥需为不超过 2048 个字符的文本。",
+            "proactive_gap_minutes": "提醒间隔需为 30–1440 分钟的整数。",
+            **{field: "调用开关需为开启或关闭。" for field in
+               ("ai_enabled", "shadow_ai_enabled", "proactive_enabled",
+                "proactive_ai_enabled", "scheduled_ai_enabled", "clear_key")},
+        }
+        for field, hint in hints.items():
+            if field in body:
+                try:
+                    user_controls._validate({field: body[field]})
+                except ValueError:
+                    return {**result, "reason": "invalid_field", "field": field,
+                            "detail": hint + "本次未保存。"}
+        return {**result, "reason": "invalid_settings", "detail":
+                "设置内容不合法，本次未保存，请检查字段后重试。"}
+    return {**result, "reason": "settings_unreadable", "detail":
+            "现有设置无法读取，本次未保存；请保留原文件，先备份再排查。"}
+
+
 @app.post("/v1/manage/ai")
 def manage_ai(request: Request, body: dict = Body(...)):
     if not _local_write(request):
@@ -501,8 +544,8 @@ def manage_ai(request: Request, body: dict = Body(...)):
                             headers=_MANAGE_HEADERS)
     try:
         safe = user_controls.save(body)
-    except (ValueError, OSError):
-        return JSONResponse({"error": "invalid_or_unwritable_settings"}, status_code=400,
+    except (ValueError, OSError) as error:
+        return JSONResponse(_manage_ai_save_error(body, error), status_code=400,
                             headers=_MANAGE_HEADERS)
     return JSONResponse({"ai": safe, "provider": llm_mod.public_provider()}, headers=_MANAGE_HEADERS)
 
